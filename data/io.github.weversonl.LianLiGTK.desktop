@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Lian Li Control
+Name=LianLiGTK
 Comment=Control Lian Li fans, AIOs, and Strimer RGB cables
 Exec=lian-li-gtk
 Icon=io.github.weversonl.LianLiGTK

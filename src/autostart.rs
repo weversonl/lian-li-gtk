@@ -45,7 +45,7 @@ pub fn set_enabled(enabled: bool) {
     let contents = format!(
         "[Desktop Entry]\n\
          Type=Application\n\
-         Name=Lian Li Control\n\
+         Name=LianLiGTK\n\
          Icon=io.github.weversonl.LianLiGTK\n\
          Exec={} --start-hidden\n\
          X-GNOME-Autostart-enabled=true\n\

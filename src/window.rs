@@ -94,10 +94,10 @@ pub fn build_ui(app: &adw::Application) {
     detail_toolbar.add_top_bar(&detail_header);
     detail_toolbar.set_content(Some(&detail_box));
 
-    // "Lian Li Control" is the app's own name, not a translated phrase — it
+    // "LianLiGTK" is the app's own name, not a translated phrase — it
     // stays the same in both languages the same way a product name would.
     let dashboard_page = adw::NavigationPage::builder()
-        .title("Lian Li Control")
+        .title("LianLiGTK")
         .tag("dashboard")
         .child(&detail_toolbar)
         .build();
@@ -111,7 +111,7 @@ pub fn build_ui(app: &adw::Application) {
         .build();
 
     let content_page = adw::NavigationPage::builder()
-        .title("Lian Li Control")
+        .title("LianLiGTK")
         .child(&content_nav)
         .build();
 
@@ -125,7 +125,7 @@ pub fn build_ui(app: &adw::Application) {
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
-        .title("Lian Li Control")
+        .title("LianLiGTK")
         .default_width(980)
         .default_height(640)
         .content(&toast_overlay)

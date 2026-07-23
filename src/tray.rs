@@ -35,7 +35,7 @@ impl ksni::Tray for AppTray {
     }
 
     fn title(&self) -> String {
-        "Lian Li Control".into()
+        "LianLiGTK".into()
     }
 
     // Only used as a fallback for a host that ignores `icon_pixmap`

@@ -95,7 +95,7 @@ Builds the release binary and installs it entirely under `$HOME` — no root nee
 - app icon → `~/.local/share/icons/hicolor/scalable/apps/`
 - app launcher entry → `~/.local/share/applications/`
 
-After that, "Lian Li Control" shows up in your app launcher with its own icon (window, dock, and app switcher all use it — the tray icon is deliberately the same fan glyph used for fan devices in the sidebar instead). To remove everything the script installed:
+After that, "LianLiGTK" shows up in your app launcher with its own icon (window, dock, and app switcher all use it — the tray icon is deliberately the same fan glyph used for fan devices in the sidebar instead). To remove everything the script installed:
 
 ```sh
 ./install.sh --uninstall

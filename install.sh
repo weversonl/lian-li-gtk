@@ -76,7 +76,7 @@ command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$
 command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 
 echo
-echo "Installed. Launch from your app launcher (\"Lian Li Control\") or run:"
+echo "Installed. Launch from your app launcher (\"LianLiGTK\") or run:"
 echo "  $BIN_DEST"
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     echo
