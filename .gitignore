@@ -1,0 +1,16 @@
+/target
+
+# Claude Code — none of it belongs in the repo, not even shared settings.
+.claude/
+
+# Editor/IDE cruft
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS cruft
+.DS_Store
+
+# rustfmt backup files
+*.rs.bk

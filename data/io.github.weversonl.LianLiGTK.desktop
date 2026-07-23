@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Lian Li Control
+Comment=Control Lian Li fans, AIOs, and Strimer RGB cables
+Exec=lian-li-gtk
+Icon=io.github.weversonl.LianLiGTK
+Categories=Utility;HardwareSettings;
+StartupWMClass=io.github.weversonl.LianLiGTK
+Terminal=false
