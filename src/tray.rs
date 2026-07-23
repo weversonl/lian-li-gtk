@@ -16,6 +16,19 @@ use gdk::prelude::{TextureExt, TextureExtManual};
 use gtk::gdk;
 use ksni::blocking::TrayMethods;
 
+/// Same 3-blade pinwheel as `window::FAN_SVG`, just recolored white instead
+/// of that gray — the sidebar's dim gray reads fine sitting next to dim
+/// text on a card, but the same gray as a tiny standalone tray icon read as
+/// washed-out/hard to see against a panel, unlike every other (symbolic,
+/// effectively white/theme-colored) tray icon next to it.
+const FAN_SVG_TRAY: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 16 16" fill="none" stroke="#f6f5f4" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
+<circle cx="8" cy="8" r="6.5"/>
+<path d="M8 8 C6.6 6.9 6.6 4.1 8 2.2 C9.4 4.1 9.4 6.9 8 8 Z" transform="rotate(0 8 8)"/>
+<path d="M8 8 C6.6 6.9 6.6 4.1 8 2.2 C9.4 4.1 9.4 6.9 8 8 Z" transform="rotate(120 8 8)"/>
+<path d="M8 8 C6.6 6.9 6.6 4.1 8 2.2 C9.4 4.1 9.4 6.9 8 8 Z" transform="rotate(240 8 8)"/>
+<circle cx="8" cy="8" r="1.2" fill="#f6f5f4"/>
+</svg>"##;
+
 #[derive(Debug, Clone, Copy)]
 pub enum TrayEvent {
     ToggleShow,
@@ -49,11 +62,11 @@ impl ksni::Tray for AppTray {
         }
     }
 
-    // Raw pixel data, not a named theme icon — this is the same fan glyph
-    // `window.rs` draws for every fan device in the sidebar (`FAN_SVG`),
-    // rasterized once at spawn time (see `spawn`) so the tray always shows
-    // it regardless of whether any icon theme has this app's icon
-    // installed at all.
+    // Raw pixel data, not a named theme icon — the same fan glyph
+    // `window.rs` draws for every fan device in the sidebar, just recolored
+    // white (`FAN_SVG_TRAY`) for a tray-sized icon, rasterized once at
+    // spawn time (see `spawn`) so the tray always shows it regardless of
+    // whether any icon theme has this app's icon installed at all.
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         self.icon.clone().into_iter().collect()
     }
@@ -92,13 +105,13 @@ impl ksni::Tray for AppTray {
 /// every other piece of UI text in this app, the language only actually
 /// changes on the next restart (see `Lang`'s doc comment), so there's
 /// nothing to keep in sync here.
-/// Rasterizes `crate::window::FAN_SVG` into the raw ARGB32 pixel data
-/// `ksni::Icon` (and the underlying StatusNotifierItem D-Bus property)
-/// wants — has to happen here, on the main GTK thread, since `AppTray`'s
-/// `Tray` impl runs on ksni's own background thread and can't touch
-/// `gdk::Texture` at all (see this module's doc comment).
+/// Rasterizes `FAN_SVG_TRAY` into the raw ARGB32 pixel data `ksni::Icon`
+/// (and the underlying StatusNotifierItem D-Bus property) wants — has to
+/// happen here, on the main GTK thread, since `AppTray`'s `Tray` impl runs
+/// on ksni's own background thread and can't touch `gdk::Texture` at all
+/// (see this module's doc comment).
 fn rasterize_fan_icon() -> Option<ksni::Icon> {
-    let bytes = gdk::glib::Bytes::from_static(crate::window::FAN_SVG.as_bytes());
+    let bytes = gdk::glib::Bytes::from_static(FAN_SVG_TRAY.as_bytes());
     let texture = gdk::Texture::from_bytes(&bytes).ok()?;
     let width = texture.width();
     let height = texture.height();
