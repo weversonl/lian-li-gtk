@@ -11,12 +11,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-/// A snapshot of every control on the RGB Editor page for one device —
-/// everything needed to redraw the page exactly as the user left it.
-/// Persisted to disk (see `crate::editor_snapshots`) — without this,
-/// reopening the editor for a device (even across app restarts) always
-/// reset to Static/100% brightness/first zone, discarding whatever the user
-/// had actually picked, since nothing remembered it between visits.
+/// Every control on the RGB Editor page for one device. Persisted to disk
+/// (`crate::editor_snapshots`) so reopening the editor restores it.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct RgbEditorSnapshot {
     pub mode: RgbMode,
@@ -29,25 +25,18 @@ pub struct RgbEditorSnapshot {
     pub strip_count: usize,
 }
 
-/// What was last successfully applied to a wireless device — enough to
-/// reapply it verbatim after "Identify" or a rebind, without needing to
-/// know *why* it was applied (RGB Editor vs. Global Effects) or regenerate
-/// it from scratch. `Static` keeps one `(zone, effect)` pair per zone that
-/// was actually set, since Global Effects applies the same effect to every
-/// zone on a device while the RGB Editor targets just one.
+/// Last effect successfully applied to a wireless device, for reapplying
+/// after "Identify" or a rebind. `Static` holds one `(zone, effect)` pair
+/// per zone actually set.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum LastEffect {
-    /// Frame buffer + interval, plus the `RgbMode` they were rendered from
-    /// (Rainbow/Rainbow Morph/Breathing) — the frames alone don't say which
-    /// mode produced them, but the device detail page's "Current Effect"
-    /// stat needs a name to show.
+    /// Frames + interval, plus the `RgbMode` they were rendered from (the
+    /// frames alone don't say which mode produced them).
     Frames(Vec<Vec<[u8; 3]>>, u16, RgbMode),
     Static(Vec<(u8, RgbEffect)>),
 }
 
 impl LastEffect {
-    /// The mode this effect displays as, for the device detail page's
-    /// "Current Effect" stat.
     pub fn mode(&self) -> RgbMode {
         match self {
             LastEffect::Frames(_, _, mode) => *mode,
@@ -61,32 +50,16 @@ pub struct Ctx {
     pub state: SharedState,
     pub toast_overlay: adw::ToastOverlay,
     pub nav: adw::NavigationView,
-    /// Local-only cosmetic nicknames, keyed by device_id. Never touches the
-    /// daemon/hardware — see `crate::device_names`.
+    /// Cosmetic nicknames, keyed by device_id — see `crate::device_names`.
     pub custom_names: Rc<RefCell<HashMap<String, String>>>,
-    /// Local-only per-device Rainbow direction/strip-count, keyed by
-    /// device_id — see `crate::device_rgb_prefs`.
+    /// Per-device Rainbow direction/strip-count — see `crate::device_rgb_prefs`.
     pub rgb_prefs: Rc<RefCell<HashMap<String, DeviceRgbPrefs>>>,
-    /// Local-only device_id ordering for Global Effects' "Included Devices"
-    /// list — see `crate::device_order`.
+    /// Device order for the sidebar and Global Effects — see `crate::device_order`.
     pub device_order: Rc<RefCell<Vec<String>>>,
-    /// Small page-level UI toggles — see `crate::app_prefs`.
     pub app_prefs: Rc<RefCell<AppPrefs>>,
-    /// Disk-persisted (see `crate::last_effect`) record of the last effect
-    /// successfully applied to each wireless device, from *any* page (RGB
-    /// Editor or Global Effects). Two things read this: "Identify" resumes
-    /// it after blinking instead of freezing a static snapshot
-    /// (`GetZoneColors`/`SetRgbDirect` can only capture one still frame,
-    /// not an animation), and Bind reapplies it after a rebind — the device
-    /// doesn't remember its own effect across an unbind/bind cycle, so
-    /// without this it just comes back dark/idle. Used to be in-memory
-    /// only, which meant restarting the app between applying an animation
-    /// and hitting Identify silently lost it — Identify then had nothing to
-    /// resume and fell back to capturing/restoring a single still frame,
-    /// which for a mid-animation device could easily be read back as "off".
+    /// Last effect applied per wireless device — see `crate::last_effect`.
     pub last_effect: Rc<RefCell<HashMap<String, LastEffect>>>,
-    /// Disk-persisted cache of the RGB Editor's last-used controls per
-    /// device — see `RgbEditorSnapshot`.
+    /// RGB Editor's last-used controls per device — see `RgbEditorSnapshot`.
     pub editor_snapshots: Rc<RefCell<HashMap<String, RgbEditorSnapshot>>>,
 }
 
@@ -98,8 +71,6 @@ impl Ctx {
         self.toast_overlay.add_toast(adw::Toast::new(message));
     }
 
-    /// A toast with an action button (e.g. "Restart") instead of a plain
-    /// message telling the user to go do something themselves.
     pub fn toast_with_button(&self, message: &str, button_label: &str, on_click: impl Fn() + 'static) {
         let toast = adw::Toast::new(message);
         toast.set_button_label(Some(button_label));
@@ -111,13 +82,8 @@ impl Ctx {
         self.nav.push(page);
     }
 
-    /// Pushes `build()`'s page, unless a page tagged `tag` is already
-    /// somewhere in the nav stack — then it just jumps back to that existing
-    /// instance instead. Without this, repeatedly opening a global page like
-    /// Wireless Pairing or Global Effects (both reachable from a sidebar
-    /// icon at any time, not tied to a specific spot in the flow) stacked up
-    /// one nav entry per click, so the back button had to be pressed once
-    /// per click to actually get anywhere.
+    /// Pushes `build()`'s page, unless one tagged `tag` is already in the
+    /// nav stack — then jumps back to it instead of stacking a duplicate.
     pub fn push_singleton(&self, tag: &str, build: impl FnOnce() -> adw::NavigationPage) {
         if self.nav.find_page(tag).is_some() {
             self.nav.pop_to_tag(tag);
@@ -152,10 +118,7 @@ impl Ctx {
         self.rgb_prefs.borrow().get(device_id).copied().unwrap_or_default()
     }
 
-    /// `None` means nothing has been explicitly saved for this device yet —
-    /// distinct from `rgb_prefs_for`'s default, which callers that don't
-    /// have a separate "global default" fallback (like Global Effects does)
-    /// can't tell apart from an explicit save of the default values.
+    /// `None` if nothing's been explicitly saved yet, unlike `rgb_prefs_for`.
     pub fn rgb_prefs_for_opt(&self, device_id: &str) -> Option<DeviceRgbPrefs> {
         self.rgb_prefs.borrow().get(device_id).copied()
     }
@@ -166,8 +129,7 @@ impl Ctx {
         crate::device_rgb_prefs::save(&prefs);
     }
 
-    /// Sorts `devices` by the saved order (devices never seen before keep
-    /// their relative daemon-reported order and land at the end).
+    /// Sorts by saved order; unseen devices land at the end.
     pub fn sort_by_saved_order(&self, mut devices: Vec<DeviceInfo>) -> Vec<DeviceInfo> {
         let order = self.device_order.borrow();
         devices.sort_by_key(|d| order.iter().position(|id| id == &d.device_id).unwrap_or(usize::MAX));
@@ -189,11 +151,7 @@ impl Ctx {
         crate::app_prefs::save(&prefs);
     }
 
-    /// Global Effects' Custom Gradient Wave stops — page-level, not
-    /// per-device (that page applies to every device at once, so there's no
-    /// single device to key an `RgbEditorSnapshot` off of). Without this it
-    /// reset to the same 8 white swatches every time the page was reopened,
-    /// forcing the user to repick all 8 colors every session.
+    /// Global Effects' Gradient Wave stops — page-level, not per-device.
     pub fn gradient_colors(&self) -> [[u8; 3]; 8] {
         self.app_prefs.borrow().gradient_colors
     }
@@ -204,8 +162,6 @@ impl Ctx {
         crate::app_prefs::save(&prefs);
     }
 
-    /// Last effect mode picked on the Global Effects page — see
-    /// `AppPrefs::global_effect_mode`'s doc comment.
     pub fn global_effect_mode(&self) -> RgbMode {
         self.app_prefs.borrow().global_effect_mode
     }
@@ -216,7 +172,6 @@ impl Ctx {
         crate::app_prefs::save(&prefs);
     }
 
-    /// See `AppPrefs::default_device_id`'s doc comment.
     pub fn default_device_id(&self) -> Option<String> {
         self.app_prefs.borrow().default_device_id.clone()
     }
@@ -241,17 +196,13 @@ impl Ctx {
         self.app_prefs.borrow().lang
     }
 
-    /// Takes effect on the next launch, not immediately — see `Lang`'s doc
-    /// comment. Callers are expected to toast a "restart to apply" message
-    /// themselves (Preferences does), since this alone doesn't rebuild any
-    /// already-open page.
+    /// Takes effect on next launch, not immediately — see `Lang`'s doc comment.
     pub fn set_lang(&self, lang: Lang) {
         let mut prefs = self.app_prefs.borrow_mut();
         prefs.lang = lang;
         crate::app_prefs::save(&prefs);
     }
 
-    /// Looks up `key` in the current language — see `crate::i18n`.
     pub fn t(&self, key: &str) -> &'static str {
         crate::i18n::t(self.lang(), key)
     }
@@ -262,9 +213,7 @@ impl Ctx {
         crate::last_effect::save(&map);
     }
 
-    /// Replaces (not merges) the recorded static effect for a device — call
-    /// once with every `(zone, effect)` pair that was actually sent for
-    /// this device in one "apply" action, not per-zone.
+    /// Replaces (not merges) the recorded static effect for a device.
     pub fn record_static_effect(&self, device_id: &str, zone_effects: Vec<(u8, RgbEffect)>) {
         let mut map = self.last_effect.borrow_mut();
         map.insert(device_id.to_string(), LastEffect::Static(zone_effects));
@@ -275,12 +224,6 @@ impl Ctx {
         self.last_effect.borrow().get(device_id).cloned()
     }
 
-    /// Same-MAC device_id changes prefix across a bind/unbind cycle
-    /// (`wireless:<mac>` <-> `wireless-unbound:<mac>`) — call this after a
-    /// successful Bind so the freshly-rebound `wireless:<mac>` id picks up
-    /// whatever was recorded under the old `wireless-unbound:<mac>` one (or
-    /// vice versa after Unbind, for symmetry, even though there's nothing
-    /// left to send an unbound device).
     pub fn editor_snapshot_for(&self, device_id: &str) -> Option<RgbEditorSnapshot> {
         self.editor_snapshots.borrow().get(device_id).cloned()
     }
@@ -291,6 +234,8 @@ impl Ctx {
         crate::editor_snapshots::save(&snapshots);
     }
 
+    /// Carries a recorded effect across a device_id change from bind/unbind
+    /// (`wireless:<mac>` <-> `wireless-unbound:<mac>`).
     pub fn migrate_last_effect(&self, old_device_id: &str, new_device_id: &str) {
         if old_device_id == new_device_id {
             return;

@@ -1,15 +1,9 @@
-//! Segmented pill control: a horizontal row of linked toggle buttons, one
-//! active at a time — the "Efeito"/"DPI"/"Taxa de atualização" row style
-//! from the user's Razer companion app, which is now this project's
-//! standard picker for short option lists (roughly ≤6). Longer lists
-//! (e.g. the ~28-value RgbMode picker in the RGB Editor) stay as
-//! `AdwComboRow` — pills that wrap or scroll horizontally would look worse
-//! than a dropdown once there are more than a handful of options.
+//! Segmented pill control: a row of linked toggle buttons, one active at a
+//! time. Used for short option lists; longer ones use `AdwComboRow` instead.
 
 use gtk::prelude::*;
 
-/// Builds the button row. `on_change` fires with the newly selected index
-/// whenever the user picks a different option (not on the initial build).
+/// `on_change` fires with the newly selected index, not on initial build.
 pub fn build(options: &[&str], selected: usize, on_change: impl Fn(usize) + 'static) -> gtk::Box {
     let container = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)

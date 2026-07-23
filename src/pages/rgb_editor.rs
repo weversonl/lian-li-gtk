@@ -2,31 +2,18 @@
 //! colors, speed/brightness, and Apply.
 //!
 //! Wired devices use exactly what the daemon reports in
-//! `GetRgbCapabilities.supported_modes` and go out via `SetRgbEffect` (the
-//! firmware runs the animation).
+//! `GetRgbCapabilities.supported_modes` via `SetRgbEffect`.
 //!
-//! Wireless devices only ever report `["Static", "Direct"]` there, because
-//! `RgbController::set_effect` (daemon side) just pushes a solid color to
-//! them regardless of mode — there's no firmware-side rainbow to ask for.
-//! So for wireless devices this editor adds a client-rendered set (Rainbow,
-//! Rainbow Morph, Breathing, Custom Gradient Wave) that gets turned into
-//! frames here and shipped via `SetRgbFrames`, which is the only way those
-//! devices actually animate. Frames address the whole device's LED buffer,
-//! not a single zone, so the zone selector is hidden once one of those
-//! modes is picked.
+//! Wireless devices only ever report `["Static", "Direct"]`, since the
+//! daemon just pushes a solid color to them regardless of mode. This editor
+//! adds a client-rendered set (Rainbow, Rainbow Morph, Breathing, Gradient
+//! Wave) turned into frames and shipped via `SetRgbFrames`, which addresses
+//! the whole device's LED buffer, so the zone selector is hidden for those.
 //!
-//! "Custom Gradient Wave" (OpenRGB's name for the same effect, e.g. its
-//! "Unicorn Vomit" preset) isn't a real mode in the Lian Li protocol's
-//! `RgbMode` enum — that enum is fixed, vendored from the daemon's own
-//! crate, not something this app can add a variant to. It's tagged onto
-//! `RgbMode::ColorCycle` instead (repurposed only when the device is
-//! wireless — see `effect_mode_label`), since the actual value sent to the
-//! daemon for a wireless animation is just raw frames; `SetRgbFrames` has no
-//! mode field at all, `mode` only exists client-side for bookkeping (this
-//! dropdown, and the "Current Effect" stat). A wired device that genuinely
-//! supports a native "Color Cycle" firmware mode is unaffected — that path
-//! never sets `is_wireless`, so it keeps its real name and goes out via
-//! `SetRgbEffect` untouched.
+//! "Gradient Wave" isn't a real `RgbMode` — it's tagged onto
+//! `RgbMode::ColorCycle`, repurposed only when wireless (see
+//! `effect_mode_label`), since `SetRgbFrames` has no mode field at all. A
+//! wired device with a genuine native "Color Cycle" mode is unaffected.
 
 use crate::context::Ctx;
 use crate::direction::{direction_label, ALL_DIRECTIONS};
@@ -48,9 +35,6 @@ use std::rc::Rc;
 const WIRELESS_ANIMATED_MODES: [RgbMode; 4] =
     [RgbMode::Rainbow, RgbMode::RainbowMorph, RgbMode::Breathing, RgbMode::ColorCycle];
 
-/// Real name for every mode except our repurposed `ColorCycle` tag, which
-/// only means "Gradient Wave" for a wireless device — see this module's
-/// doc comment.
 fn effect_mode_label(mode: RgbMode, is_wireless: bool) -> &'static str {
     if is_wireless && mode == RgbMode::ColorCycle {
         "Gradient Wave"
@@ -72,8 +56,6 @@ fn color_count_for_mode(mode: RgbMode) -> usize {
     }
 }
 
-/// Fixed slider width, consistent with Global Effects' sliders — see that
-/// module's `SLIDER_WIDTH` doc comment for why `hexpand` alone isn't enough.
 const SLIDER_WIDTH: i32 = 220;
 
 fn scope_label(s: RgbScope, ctx: &Ctx) -> &'static str {
@@ -94,14 +76,8 @@ struct EditorState {
     speed_percent: f64,
     brightness_percent: f64,
     zone: u8,
-    /// How many physical LED strips this device's flat LED buffer is made
-    /// of — confirmed on real hardware that Strimer cables concatenate
-    /// several parallel strips in the buffer rather than laying out LEDs
-    /// in physical order, so without this each strip plays its own
-    /// independent slice of the gradient (looks tiled/chopped up) instead
-    /// of every strip moving in sync, which is what L-Connect's "merge"
-    /// mode actually does. `1` = treat the buffer as one continuous strip
-    /// (today's plain gradient).
+    /// Physical LED strips concatenated in this device's flat buffer. `1`
+    /// treats it as one continuous strip.
     strip_count: usize,
 }
 
@@ -181,20 +157,11 @@ fn build_editor(
 ) {
     let is_wireless = device_id.starts_with("wireless:");
 
-    // Wireless devices only report Static/Direct as real hardware modes —
-    // the animated ones here are rendered client-side (see module docs).
     let mut selectable_modes = caps.supported_modes.clone();
     if is_wireless {
         selectable_modes.extend(WIRELESS_ANIMATED_MODES);
     }
 
-    // Wave direction/strip count are remembered per device (see
-    // device_rgb_prefs) — no reason to make the user re-enter "8 strips,
-    // Down" every time they reopen this cable's editor. Everything else
-    // (mode, colors, speed, brightness, zone, scope) comes from the last
-    // snapshot saved on Apply, if this device has one — without it, leaving
-    // and reopening the editor always reset to Static/100% brightness/zone 0
-    // no matter what was last applied.
     let saved_prefs = ctx.rgb_prefs_for(device_id);
     let snapshot = ctx.editor_snapshot_for(device_id);
     let initial_mode = snapshot
@@ -259,21 +226,12 @@ fn build_editor(
         .build();
     content.append(&zone_note);
 
-    // Built here (ahead of the mode selector below, which needs to toggle
-    // their visibility) but not appended to `content` until after
-    // `mode_group` — `Box::append` only controls visual order, not
-    // construction order, so this doesn't move them on screen.
     let colors_label = gtk::Label::builder()
         .label(ctx.t("rgb_editor.colors"))
         .css_classes(["caption-heading", "dim-label"])
         .halign(gtk::Align::Start)
         .visible(mode_uses_color(initial_mode))
         .build();
-    // `FlowBox`, not a plain `Box` — a plain `Box` overflowed past the
-    // card's edge on a narrow window instead of wrapping. `max_children_per_line`
-    // has to be raised from `FlowBox`'s own default of 7 to fit all 8 —
-    // otherwise it force-wraps the 8th swatch onto its own line even with
-    // plenty of width to spare.
     let colors_box = gtk::FlowBox::builder()
         .selection_mode(gtk::SelectionMode::None)
         .row_spacing(8)
@@ -311,8 +269,6 @@ fn build_editor(
         color_buttons.push(button);
     }
 
-    // Effect mode — daemon-reported modes for wired devices, plus the
-    // client-rendered animated set for wireless ones.
     let mode_group = adw::PreferencesGroup::new();
     let mode_names: Vec<&str> = selectable_modes.iter().map(|m| effect_mode_label(*m, is_wireless)).collect();
     let mode_model = gtk::StringList::new(&mode_names);
@@ -347,10 +303,7 @@ fn build_editor(
             }
         });
     }
-    // `set_selected` above only fires `connect_selected_notify` when the
-    // index actually changes from the widget's own default (0) — so restore
-    // the zone-picker sensitivity/note for the initial mode by hand instead
-    // of assuming the signal already did it.
+    // `set_selected` doesn't fire the signal if the index is already 0.
     let initial_whole_device_only = is_wireless && WIRELESS_ANIMATED_MODES.contains(&initial_mode);
     if caps.zones.len() > 1 {
         zone_box.set_sensitive(!initial_whole_device_only);
@@ -395,9 +348,6 @@ fn build_editor(
     content.append(&colors_label);
     content.append(&colors_box);
 
-    // Speed / brightness as 0-100% sliders (matches how the rest of the app
-    // expresses these), converted to the firmware's 0-4 scale only when a
-    // wired SetRgbEffect actually needs it.
     let sliders_group = adw::PreferencesGroup::new();
 
     let speed_row = adw::ActionRow::builder().title(ctx.t("rgb_editor.speed")).build();
@@ -505,11 +455,7 @@ fn build_editor(
                 return;
             }
 
-            // Wireless Static/Direct pushes forward these color bytes to the
-            // device as-is — the daemon doesn't scale them by
-            // `RgbEffect.brightness` (that field only means something to
-            // wired firmware), so brightness has to be baked into the color
-            // itself here, same as every other wireless effect already does.
+            // Wireless ignores `RgbEffect.brightness`, so bake it into the color.
             let effect_colors: Vec<[u8; 3]> = if is_wireless {
                 let factor = brightness_percent / 100.0;
                 colors.iter().map(|c| scale_color(*c, factor)).collect()
@@ -531,10 +477,6 @@ fn build_editor(
                     if is_wireless {
                         ctx.record_static_effect(&device_id, vec![(zone, effect.clone())]);
                     }
-                    // Written through to `AppConfig` so the daemon's own
-                    // wireless-drift auto-resync replays this instead of
-                    // whatever was last saved there — see `rgb_persist`'s
-                    // module doc comment.
                     crate::rgb_persist::persist_rgb_effect(&ctx, &device_id, vec![(zone, effect)]).await;
                     ctx.toast(ctx.t("rgb_editor.effect_applied"));
                 }
@@ -575,9 +517,6 @@ async fn apply_wireless_animation(
         return;
     }
 
-    // No separate FPS control in this single-device editor yet — 30fps is a
-    // sane fluid default (see the Global Effects page for a literal FPS
-    // slider).
     const DEFAULT_FPS: f64 = 30.0;
     let cycle_ms = percent_to_cycle_ms(speed_percent);
     let frame_count = frame_count_for(DEFAULT_FPS, cycle_ms);
@@ -588,10 +527,6 @@ async fn apply_wireless_animation(
         RgbMode::Rainbow => rainbow_frames(led_count, frame_count, reverse, strip_count, brightness),
         RgbMode::RainbowMorph => rainbow_morph_frames(led_count, frame_count, brightness),
         RgbMode::Breathing => breathing_frames(led_count, frame_count, colors[0], brightness),
-        // "Custom Gradient Wave" — see this module's doc comment on why
-        // `ColorCycle` is repurposed for it. Uses all 4 color pickers as
-        // gradient stops, in order (repeat the first color as the last
-        // stop yourself for a seamless loop, same convention OpenRGB uses).
         RgbMode::ColorCycle => custom_gradient_wave_frames(led_count, frame_count, &colors, reverse, strip_count, brightness),
         _ => return,
     };
@@ -604,18 +539,8 @@ async fn apply_wireless_animation(
     match ctx.client.call_unit(request).await {
         Ok(()) => {
             ctx.record_frames(device_id, frames, interval_ms, mode);
-            // Deliberately NOT persisted to `AppConfig`/`SetConfig` here.
-            // Confirmed on real hardware: `SetConfig` makes the daemon call
-            // `apply_rgb_config()` synchronously (`service/mod.rs`'s
-            // `IpcUpdate` handler), which for a wireless device pushes a
-            // single-color snapshot via `set_effect()` — that's a real RF
-            // command, not a no-op, so it immediately halts whatever
-            // animation this `SetRgbFrames` just started (and the 1s
-            // heartbeat repeats the same overwrite if drift is detected).
-            // There's no way to persist an actual frame buffer (no such
-            // field in `AppConfig`'s schema), so persisting anything here
-            // can only make a real animation freeze, never actually help a
-            // future resync. See `rgb_persist`'s doc comment.
+            // Not persisted to AppConfig — SetConfig would push a static
+            // snapshot via RF and halt this animation. See rgb_persist.
             ctx.toast(ctx.t("rgb_editor.effect_applied"));
         }
         Err(e) => ctx.toast(&format!("{}: {e}", ctx.t("rgb_editor.failed_apply"))),

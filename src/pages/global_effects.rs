@@ -1,18 +1,12 @@
-//! Global Effects: apply one effect (Static, Rainbow, Rainbow Morph,
-//! Breathing) with shared color/speed/brightness/orientation across every
-//! RGB-capable device at once — the L-Connect 3 "apply to all" tab.
+//! Global Effects: apply one effect with shared color/speed/brightness/
+//! orientation across every RGB-capable device at once.
 //!
-//! Only Rainbow gets the cross-device wave treatment (wireless devices
-//! treated as segments of one virtual strip, in the order shown below):
-//! that's the only one of these that's spatial. Static/Breathing/Rainbow
-//! Morph put every LED on every device through the *same* color/phase, so
-//! there's nothing to slice — each device just renders its own copy.
-//!
-//! Wired devices with a native hardware mode get `SetRgbEffect` (the
-//! firmware animates it); wireless devices get host-rendered frames via
-//! `SetRgbFrames`, except Static, which wireless reports as a real
-//! `SetRgbEffect`-capable mode (confirmed via `GetRgbCapabilities`) so it
-//! goes out the same way as wired.
+//! Only Rainbow gets the cross-device wave treatment (wireless devices as
+//! segments of one virtual strip) — the other modes put every LED on every
+//! device through the same color/phase, so each device just renders its
+//! own copy. Wired devices with a native mode get `SetRgbEffect`; wireless
+//! devices get host-rendered frames via `SetRgbFrames`, except Static,
+//! which wireless reports as a real `SetRgbEffect`-capable mode.
 
 use crate::context::Ctx;
 use crate::direction::{self, wave_direction_label, WAVE_DIRECTIONS};
@@ -33,10 +27,8 @@ use std::rc::Rc;
 const MODES: [RgbMode; 5] =
     [RgbMode::Static, RgbMode::Rainbow, RgbMode::RainbowMorph, RgbMode::Breathing, RgbMode::ColorCycle];
 
-/// `ColorCycle` is repurposed here exactly like in `rgb_editor` — see that
-/// module's doc comment. Wireless-only: there's no wired firmware
-/// equivalent, so wired devices are just skipped when this mode is picked
-/// (see `apply_global_effect`).
+/// `ColorCycle` is repurposed here exactly like in `rgb_editor` — wireless
+/// only, wired devices are skipped for this mode (see `apply_global_effect`).
 fn mode_label(mode: RgbMode) -> &'static str {
     if mode == RgbMode::ColorCycle {
         "Gradient Wave"
@@ -45,19 +37,10 @@ fn mode_label(mode: RgbMode) -> &'static str {
     }
 }
 
-/// Fixed width for every slider on this page — left as `hexpand`, each one
-/// ended up a different width depending on its row's other content (e.g.
-/// the FPS row's longer subtitle left less room than Speed's), which read
-/// as visually inconsistent even though nothing was actually wrong with any
-/// one of them individually.
 const SLIDER_WIDTH: i32 = 220;
 
-/// Breathing room between back-to-back IPC sends to different wireless
-/// devices/zones. The daemon returns `ok` as soon as it queues a command on
-/// the RF dongle, not once the device firmware confirms receipt — firing
-/// several sends with no gap risked the dongle dropping/colliding one of
-/// them, which is why "Apply to All Devices" would silently skip whichever
-/// device/zone landed last in the sequence.
+/// Gap between back-to-back IPC sends — the daemon acks as soon as a
+/// command is queued on the RF dongle, so no gap risks dropped commands.
 const IPC_SEND_DELAY_MS: u64 = 100;
 
 async fn ipc_send_delay() {
@@ -77,8 +60,6 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
     content.set_margin_start(24);
     content.set_margin_end(24);
 
-    // Plain heading, no card — matches the reference app's device-detail
-    // style (bold title + dim description directly below, no boxed banner).
     content.append(
         &gtk::Label::builder()
             .label(ctx.t("ge.title"))
@@ -98,23 +79,10 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
     let controls_group = adw::PreferencesGroup::new();
 
     let mode_names: Vec<&str> = MODES.iter().map(|m| mode_label(*m)).collect();
-    // Remembers whichever mode was last applied here (see
-    // `Ctx::global_effect_mode`'s doc comment) — without this, leaving and
-    // reopening this page always reset the picker to Rainbow no matter what
-    // had actually been applied.
     let initial_mode_index = MODES.iter().position(|m| *m == ctx.global_effect_mode()).unwrap_or(1);
     let mode_index = Rc::new(Cell::new(initial_mode_index));
-    // `title_lines(1)` — without it, a narrow window squeezes this row's
-    // title column down to almost nothing (the 5-button segmented control
-    // suffix doesn't shrink), and "Efeito"/"Effect" wraps one character per
-    // line instead of just eliding with "…".
     let mode_row = adw::ActionRow::builder().title(ctx.t("ge.effect")).title_lines(1).build();
 
-    // Rainbow/Rainbow Morph auto-cycle the full hue wheel on their own — any
-    // color picked here is ignored for those, so the row (and its "Used by
-    // Static and Breathing" hint) only makes sense to show for the modes
-    // that actually use a single color — Gradient Wave has its own 8-swatch
-    // row below instead.
     let single_color_mode = |m: RgbMode| mode_uses_color(m) && m != RgbMode::ColorCycle;
     let color_row = adw::ActionRow::builder()
         .title(ctx.t("ge.color"))
@@ -129,25 +97,12 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
         .build();
     color_row.add_suffix(&color_button);
 
-    // Custom Gradient Wave's gradient stops — same swatch pattern as the RGB
-    // Editor's `colors_box`, reused here so both pages build the same kind
-    // of `RgbEffect.colors` payload for the repurposed `ColorCycle` tag.
-    // Seeded from `ctx.gradient_colors()` (persisted client-side, see
-    // `Ctx::gradient_colors`'s doc comment) instead of 8 identical white
-    // swatches, and every pick is saved back immediately so reopening this
-    // page doesn't lose whatever gradient was last set up here.
     let gradient_colors: Rc<RefCell<[[u8; 3]; 8]>> = Rc::new(RefCell::new(ctx.gradient_colors()));
     let gradient_row = adw::ActionRow::builder()
         .title(ctx.t("rgb_editor.colors"))
         .title_lines(1)
         .visible(MODES[mode_index.get()] == RgbMode::ColorCycle)
         .build();
-    // `FlowBox`, not a plain `Box` — a plain `Box` overflowed past the
-    // card's edge on a narrow window instead of wrapping (same fix as the
-    // RGB Editor's `colors_box`). `max_children_per_line` has to be raised
-    // from `FlowBox`'s own default of 7 to fit all 8 — otherwise it force-
-    // wraps the 8th swatch onto its own line even with plenty of width to
-    // spare, which is exactly what a bare default looked like here.
     let gradient_box = gtk::FlowBox::builder()
         .selection_mode(gtk::SelectionMode::None)
         .row_spacing(8)
@@ -204,9 +159,6 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
     speed_row.add_suffix(&speed_scale);
     controls_group.add(&speed_row);
 
-    // Literal FPS, not an abstract "smoothness %" — independent from Speed
-    // (which only controls how long a full cycle takes). How many frames
-    // that cycle actually needs falls out of fps × cycle length.
     let fps_row = adw::ActionRow::builder()
         .title(ctx.t("ge.fps"))
         .subtitle(ctx.t("ge.fps_subtitle"))
@@ -224,12 +176,6 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
     fps_row.add_suffix(&fps_scale);
     controls_group.add(&fps_row);
 
-    // "Over 60fps" is not a validated hardware ceiling — the daemon accepts
-    // any interval_ms without checking it (confirmed by testing down to
-    // 1ms/1000fps, which still returned ok). It's just an unverified range,
-    // hence gated behind an explicit opt-in with a quiet yellow tint on the
-    // upper half of the slider once enabled, rather than silently exposing
-    // 120fps as if it were as proven as the 5-60 range below it.
     let range_row = adw::ActionRow::builder().title(ctx.t("ge.over_60fps")).build();
     {
         let fps_scale = fps_scale.clone();
@@ -274,7 +220,7 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
         .title_lines(1)
         .build();
     let direction_names: Vec<&str> = WAVE_DIRECTIONS.iter().map(|d| wave_direction_label(*d, ctx.lang())).collect();
-    let global_direction = Rc::new(Cell::new(RgbDirection::Up)); // matches segmented_control's initial index 0
+    let global_direction = Rc::new(Cell::new(RgbDirection::Up));
     let direction_control = segmented_control::build(&direction_names, 0, {
         let global_direction = global_direction.clone();
         move |i| {
@@ -283,12 +229,6 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
             }
         }
     });
-    // Every device already gets an explicit direction (its own saved
-    // pref, or this default, eagerly recorded — see render_device_order),
-    // so this switch is purely "let me touch the default" vs. "leave it
-    // alone, don't tempt me to bump it by accident" — not a functional
-    // on/off for the wave itself. Persisted like everything else here (see
-    // app_prefs) — it kept resetting to enabled on every restart before.
     let direction_enabled = ctx.global_direction_enabled();
     let direction_enabled_switch =
         gtk::Switch::builder().valign(gtk::Align::Center).active(direction_enabled).build();
@@ -296,10 +236,6 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
     direction_row.add_suffix(&direction_enabled_switch);
     controls_group.add(&direction_row);
 
-    // A proper AdwActionRow, not a bare GtkBox — that's what gets the same
-    // gray boxed-list card background and automatic label-left/control-right
-    // layout as every other row here, instead of floating outside the card
-    // with no background.
     let direction_value_row = adw::ActionRow::builder().title(ctx.t("ge.direction")).build();
     direction_value_row.add_suffix(&direction_control);
     controls_group.add(&direction_value_row);
@@ -423,11 +359,6 @@ fn render_device_order(
     let direction_names: Vec<&str> = WAVE_DIRECTIONS.iter().map(|d| wave_direction_label(*d, ctx.lang())).collect();
     let count = devices.len();
     for (i, device) in devices.iter().enumerate() {
-        // Two stacked rows per device instead of one: cramming a 6-character
-        // name label, a direction picker, and 2 reorder buttons into a
-        // single row line left almost no room for the name (it was
-        // ellipsizing to 2-3 characters). Splitting them means the name
-        // gets the row to itself.
         let row = adw::ActionRow::builder().title(ctx.display_name(device)).title_lines(1).build();
         row.add_prefix(&gtk::Label::new(Some(&(i + 1).to_string())));
 
@@ -489,11 +420,7 @@ fn render_device_order(
         row.add_suffix(&down_button);
         list_box.append(&row);
 
-        // Direction override — checked in this order: touched already this
-        // session (device_directions) → saved from a previous session
-        // (device_rgb_prefs, e.g. "this cable always runs Down") → whatever
-        // the global Orientation control is currently set to. Only devices
-        // without an explicit pick anywhere follow the global default.
+        // Priority: touched this session, then saved prefs, then global default.
         let saved_prefs = ctx.rgb_prefs_for_opt(&device.device_id);
         let current_dir = device_directions
             .borrow()
@@ -502,25 +429,13 @@ fn render_device_order(
             .or_else(|| saved_prefs.map(|p| p.direction))
             .unwrap_or_else(|| global_direction.get());
         let selected_index = WAVE_DIRECTIONS.iter().position(|d| *d == current_dir).unwrap_or(0);
-        // Whatever ends up selected (session override, saved pref, or
-        // global default) must land in the map immediately — not only when
-        // the user touches the control — otherwise `Apply to All Devices`
-        // reads an empty map on the very first click after opening the app
-        // and silently falls back to the global default for every device,
-        // even though the pills on screen already show the right thing.
+        // Recorded immediately, not just on touch — Apply to All Devices
+        // reads this map and must not see it empty for an untouched device.
         device_directions.borrow_mut().insert(device.device_id.clone(), current_dir);
 
         let direction_row2 = adw::ActionRow::builder().title(ctx.t("ge.direction")).build();
-        // How many physical LED strips this device's flat LED buffer is
-        // made of, concatenated strip-by-strip — confirmed on real hardware
-        // (coloring the buffer in 4 equal quarters showed up as 2 solid
-        // physical strips per quarter, i.e. 8 strips total for that cable).
-        // Every strip reaches the same point in the gradient at the same
-        // time instead of each one playing its own independent slice —
-        // that's what makes a "merged" cable read as one clean band instead
-        // of a tiled/chopped-up pattern. `1` = treat the buffer as one
-        // continuous strip (the plain per-LED gradient). Same saved/session
-        // priority as Direction above.
+        // Physical LED strips concatenated in this device's flat buffer.
+        // `1` treats it as one continuous strip.
         let current_strip_count = device_segments
             .borrow()
             .get(&device.device_id)
@@ -606,18 +521,9 @@ async fn apply_global_effect(
 
     let mut ok = 0usize;
     let mut failed = 0usize;
-    // Written through to `AppConfig` once at the end (one round-trip for
-    // every device touched here) so the daemon's own wireless-drift
-    // auto-resync replays the *current* effect instead of stale config —
-    // see `rgb_persist`'s module doc comment.
     let mut to_persist: Vec<(String, Vec<(u8, RgbEffect)>)> = Vec::new();
 
-    // Wired: always a direct SetRgbEffect — the firmware renders whichever
-    // mode it natively supports; if this device can't map the mode to a
-    // hardware byte the call errors and we count it as failed rather than
-    // silently doing nothing. Custom Gradient Wave (`ColorCycle` repurposed
-    // — see `mode_label`) is wireless-only, so wired devices are just
-    // skipped for it rather than sent the repurposed tag as a real mode.
+    // ColorCycle (Gradient Wave) is wireless-only, so wired devices skip it.
     for device in &wired {
         if mode == RgbMode::ColorCycle {
             continue;
@@ -660,14 +566,6 @@ async fn apply_global_effect(
 
     match mode {
         RgbMode::Static => {
-            // Wireless reports Static as a genuine SetRgbEffect-capable
-            // mode (see GetRgbCapabilities), so it goes out the same way as
-            // wired via SetRgbEffect — but the daemon forwards the color
-            // bytes to a wireless device as-is and never scales them by
-            // `RgbEffect.brightness` (that field only does anything for
-            // wired firmware), so brightness has to be baked into the color
-            // itself here, same as Rainbow/Breathing's frame colors already
-            // are via `brightness_factor`.
             let wireless_color = scale_color(color, brightness_percent / 100.0);
             for device in &wireless {
                 let zone_count = caps
@@ -708,12 +606,7 @@ async fn apply_global_effect(
             }
         }
         RgbMode::Rainbow => {
-            // The one spatial effect: every wireless device is a segment of
-            // one shared gradient, in the order given. The base gradient is
-            // always built forward — per-device orientation is expressed
-            // entirely through `device_reversed` below, so a device whose
-            // direction resolves to e.g. Up/CCW/Gather gets its own slice
-            // flipped without touching how the other devices render.
+            // Every wireless device is a segment of one shared gradient.
             let led_counts: Vec<usize> = wireless
                 .iter()
                 .map(|d| {
@@ -749,13 +642,8 @@ async fn apply_global_effect(
                     frames: frames.clone(),
                     interval_ms,
                 };
-                // Deliberately not persisted to `AppConfig` — `SetConfig`
-                // makes the daemon call `apply_rgb_config()` synchronously,
-                // which for a wireless device pushes a single-color snapshot
-                // via `set_effect()`, a real RF command that immediately
-                // halts the animation these frames just started (confirmed
-                // on real hardware: the effect played briefly then froze on
-                // one color). See rgb_editor.rs's matching comment.
+                // Not persisted to AppConfig — see rgb_editor.rs's comment
+                // on why SetConfig would freeze this animation.
                 match ctx.client.call_unit(request).await {
                     Ok(()) => {
                         ctx.record_frames(&device.device_id, frames, interval_ms, mode);
@@ -767,11 +655,6 @@ async fn apply_global_effect(
             }
         }
         RgbMode::RainbowMorph | RgbMode::Breathing | RgbMode::ColorCycle => {
-            // Every LED on every device shows the same color at the same
-            // time — no spatial slicing, each device just renders its own
-            // copy of the same frame sequence. Custom Gradient Wave
-            // (`ColorCycle`) still respects each device's own direction and
-            // LED-strip count, same as it does in the RGB Editor.
             for device in &wireless {
                 let led_count: usize = caps
                     .iter()
@@ -799,9 +682,6 @@ async fn apply_global_effect(
                     frames: frames.clone(),
                     interval_ms,
                 };
-                // Not persisted — same reason as the Rainbow branch above:
-                // `SetConfig` would immediately push a static-color snapshot
-                // to the device and freeze this animation.
                 match ctx.client.call_unit(request).await {
                     Ok(()) => {
                         ctx.record_frames(&device.device_id, frames, interval_ms, mode);

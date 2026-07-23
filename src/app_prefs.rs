@@ -1,18 +1,11 @@
-//! Small local, page-level (not per-device) UI preferences — currently just
-//! whether the Global Effects "Orientation" default is enabled. Same spirit
-//! as `device_names`/`device_rgb_prefs`/`device_order`: plain JSON under the
-//! user's config dir, never touches the daemon/hardware.
+//! Small page-level (not per-device) UI preferences, persisted as JSON.
 
 use lianli_shared::rgb::RgbMode;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-/// UI language. Applied at startup (see `src/i18n.rs`) — switching it in
-/// Preferences takes effect on the next launch, not live, since every page
-/// in this app builds its widgets once from Rust string literals rather
-/// than binding to a reactive text source; rebuilding the entire UI tree
-/// in place would be far more failure-prone than asking for a restart.
+/// UI language. Takes effect on next launch, not live — see `src/i18n.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Lang {
     #[serde(rename = "en")]
@@ -31,31 +24,17 @@ impl Default for Lang {
 pub struct AppPrefs {
     #[serde(default = "default_true")]
     pub global_direction_enabled: bool,
-    /// Whether the Fan Curve page's "View" toggle should default to Graph
-    /// instead of List — remembers whichever the user picked last, since
-    /// forcing it back to List every time the page reopened ignored an
-    /// explicit choice.
     #[serde(default)]
     pub fan_curve_graph_view: bool,
     #[serde(default)]
     pub lang: Lang,
     /// Global Effects' Gradient Wave stops — see `Ctx::gradient_colors`.
-    /// Defaults to the user's own reference gradient (OpenRGB's "Unicorn
-    /// Vomit" preset: red, pink, dark blue, light blue, green, yellow,
-    /// orange, red again to close the loop) instead of 8 identical white
-    /// swatches, so the very first time this page opens there's already
-    /// something worth seeing instead of a blank white strip.
     #[serde(default = "default_gradient_colors")]
     pub gradient_colors: [[u8; 3]; 8],
-    /// Last effect mode picked on the Global Effects page — without this it
-    /// always reopened on Rainbow regardless of what was actually applied
-    /// last (e.g. picking Gradient Wave, leaving the page, and coming back
-    /// silently forgot it and showed Rainbow selected instead).
+    /// Last effect mode picked on the Global Effects page.
     #[serde(default = "default_global_effect_mode")]
     pub global_effect_mode: RgbMode,
-    /// Which device's detail should be auto-selected on startup (Dashboard
-    /// sidebar) — see `Ctx::default_device_id`. `None` means "whatever
-    /// device ends up first in `device_order`", not "no selection".
+    /// Device auto-selected on startup. `None` = first in `device_order`.
     #[serde(default)]
     pub default_device_id: Option<String>,
 }

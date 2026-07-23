@@ -1,9 +1,4 @@
-//! Local, persisted ordering for the "Included Devices" list in Global
-//! Effects — the Rainbow wave's cross-device order matters (see
-//! `effects::rainbow_wave_frames`), so losing it on every restart meant
-//! re-dragging ▲▼ back into place each session. Same spirit as
-//! `device_names`/`device_rgb_prefs`: a plain ordered list of device_ids,
-//! never sent to the daemon.
+//! Persisted device_id ordering, used by the sidebar and Global Effects.
 
 use std::fs;
 use std::path::PathBuf;

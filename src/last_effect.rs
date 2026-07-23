@@ -1,12 +1,5 @@
-//! Disk persistence for `LastEffect` (the last effect actually applied to
-//! each wireless device, from either the RGB Editor or Global Effects) —
-//! same spirit as `editor_snapshots`: purely client-side, never touches the
-//! daemon/hardware on its own. Without this, "Identify" and rebind-restore
-//! only had an in-session (in-memory) record to reapply after blinking a
-//! device — restarting the app between applying an animation and hitting
-//! Identify silently lost it, so Identify fell back to capturing/restoring
-//! a single still frame instead of the animation, which for a device mid-
-//! animation could easily read back as the device just turning off.
+//! Disk persistence for `LastEffect` — last effect applied per wireless
+//! device, used to restore after Identify or a rebind.
 
 use crate::context::LastEffect;
 use std::collections::HashMap;

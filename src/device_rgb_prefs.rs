@@ -1,10 +1,4 @@
-//! Local, per-device Rainbow settings (wave direction + physical LED strip
-//! count) that the user dials in once and shouldn't have to re-enter every
-//! session — e.g. this cable really does have 8 physical strips and really
-//! does look best running "Down". Purely a client-side preference, same
-//! spirit as `device_names`: never sent to the daemon, never affects
-//! `AppConfig` or hardware state, just what this app pre-fills the Rainbow
-//! controls with for a given device_id.
+//! Per-device Rainbow prefs (wave direction + physical LED strip count), client-side only.
 
 use lianli_shared::rgb::RgbDirection;
 use serde::{Deserialize, Serialize};

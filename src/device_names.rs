@@ -1,8 +1,4 @@
-//! Local, cosmetic-only device nicknames — e.g. telling apart three
-//! identical "UNI FAN SL-INF Wireless" entries by giving one "Front Fans"
-//! and another "Rear Fans". Purely a client-side label: never sent to the
-//! daemon, never affects `AppConfig` or hardware state. Persisted as a
-//! small JSON map (device_id -> nickname) under the user's config dir.
+//! Local device nicknames, client-side only. device_id -> nickname.
 
 use std::collections::HashMap;
 use std::fs;

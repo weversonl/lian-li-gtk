@@ -1,9 +1,5 @@
-//! LCD content editor. Loads the device's existing `LcdConfig` (matched by
-//! serial) from `GetConfig` and lets the user switch media type / solid
-//! color, then pushes just that one entry back via `SetLcdMedia` — cheaper
-//! and safer than reconstructing the whole `LcdConfig` (which has a dozen
-//! optional fields for sensor gauges, H264 tuning, etc. that this simple
-//! editor doesn't touch) from scratch.
+//! LCD content editor. Loads the device's `LcdConfig` (matched by serial)
+//! and pushes changes back via `SetLcdMedia`.
 
 use crate::context::Ctx;
 use crate::widgets::segmented_control;

@@ -1,10 +1,4 @@
-//! Disk persistence for `RgbEditorSnapshot` (the RGB Editor's last-used
-//! controls per device) — purely a client-side convenience, same spirit as
-//! `device_rgb_prefs`: never sent to the daemon, never touches hardware
-//! state. Without this, closing and reopening the app reset every device's
-//! editor back to Static/100% brightness/zone 0, discarding whatever was
-//! actually applied last, even though the in-session cache remembered it
-//! fine across page navigation.
+//! Disk persistence for `RgbEditorSnapshot` (last-used RGB Editor controls per device).
 
 use crate::context::RgbEditorSnapshot;
 use std::collections::HashMap;

@@ -1,31 +1,11 @@
-//! "Identify" — the L-Connect feature where selecting a device and hitting
-//! a button blinks it 3x in yellow so you can tell physically identical
-//! fans/cables apart. Only implemented for wireless devices: they're the
-//! only ones this protocol lets a client push raw per-LED frames to
-//! (`SetRgbFrames`).
+//! "Identify": blinks a wireless device 3x in yellow, then restores its
+//! previous effect (from `Ctx::last_effect`, or a captured color snapshot
+//! if nothing was recorded). Wireless-only — wired devices have no
+//! per-LED read/write query in this protocol.
 //!
-//! Restoring afterward, in priority order:
-//! 1. If `Ctx::last_effect` has a record for this device (something this
-//!    app applied this session, via RGB Editor or Global Effects), reapply
-//!    *that* (see `reapply_last_effect`, also reused by `wireless_pairing`
-//!    after a rebind — a device doesn't remember its own effect across an
-//!    unbind/bind cycle, so without this it just comes back dark/idle).
-//! 2. Otherwise (nothing recorded this session — e.g. right after opening
-//!    the app, before touching this device), fall back to capturing the
-//!    current per-zone colors before blinking and pushing them back with
-//!    `SetRgbDirect`.
-//!
-//! Every per-zone/per-request send here is spaced out by
-//! `IDENTIFY_SEND_DELAY_MS` — sending several `SetRgbDirect`/`GetZoneColors`
-//! calls back-to-back with no gap is exactly what caused "Apply to All
-//! Devices" to silently drop whichever command landed last (see
-//! `global_effects::ipc_send_delay`); the daemon acknowledges a command as
-//! soon as it's queued on the RF dongle, not once the device confirms
-//! receipt, so a same-device follow-up sent too soon can still collide.
-//!
-//! Wired devices have no equivalent "read current per-LED color" query in
-//! this protocol, so there's nothing reliable to restore to — Identify is
-//! wireless-only for now.
+//! Sends are spaced out by `IDENTIFY_SEND_DELAY_MS`: the daemon acks a
+//! command once it's queued on the RF dongle, not once the device confirms
+//! receipt, so back-to-back sends to the same device can still collide.
 
 use crate::context::{Ctx, LastEffect};
 use crate::effects::{identify_frames, IDENTIFY_STEP_MS};
@@ -41,28 +21,13 @@ async fn send_delay() {
     glib::timeout_future(Duration::from_millis(IDENTIFY_SEND_DELAY_MS)).await;
 }
 
-/// Resends whatever `Ctx::last_effect` has recorded for `device_id`, if
-/// anything. Returns `true` only if a send actually went through — it used
-/// to unconditionally return `true` for a recorded `Frames` effect even
-/// when every single send attempt failed, which silently left the device
-/// however the Identify blink itself ended (its last frame, typically
-/// dark) instead of ever really restoring anything. That's the most likely
-/// explanation for "Identify sometimes leaves the device off/stuck" after
-/// reopening the app: right after being closed for a while, a wireless
-/// device's RF link can be colder/less responsive than it is mid-session
-/// (same idle-watchdog behavior documented elsewhere in this app), so the
-/// first send failing was actually a fairly likely — not exceptional —
-/// case, not just a rebind-only edge case.
-///
-/// Retries up to `MAX_ATTEMPTS` times per send, with a growing gap between
-/// each, since a cold link may need more than one extra nudge, not just
-/// one, before it reliably takes a command again.
+/// Resends whatever `Ctx::last_effect` has for `device_id`. Returns `true`
+/// only on an actual successful send — a cold RF link (e.g. right after
+/// reopening the app) can need a few retries before it takes a command.
 const MAX_ATTEMPTS: u32 = 3;
 
 pub async fn reapply_last_effect(ctx: &Rc<Ctx>, device_id: &str) -> bool {
-    // Let the link settle a moment past the bind-state confirmation before
-    // pushing anything — the confirmation itself is the earliest sign the
-    // device is bound, not proof it's ready for a data send.
+    // Let the link settle before pushing anything.
     glib::timeout_future(Duration::from_millis(400)).await;
 
     match ctx.last_effect_for(device_id) {
@@ -142,13 +107,8 @@ pub async fn identify(ctx: &Rc<Ctx>, device_id: &str) {
         return;
     }
 
-    // Captured unconditionally now, even when there's a recorded effect to
-    // reapply instead — `reapply_last_effect` retries hard, but a wireless
-    // link that's genuinely gone cold can still fail every attempt, and
-    // this is the only fallback for that case. Skipping the capture
-    // whenever a recorded effect existed used to mean a total reapply
-    // failure left the device wherever the Identify blink itself ended
-    // (its last frame, typically dark) with nothing left to fall back to.
+    // Captured even when a recorded effect exists, as a fallback if
+    // `reapply_last_effect` fails all its retries.
     let mut captured: Vec<(u8, Vec<[u8; 3]>)> = Vec::new();
     for zone in 0..zone_count as u8 {
         let request = IpcRequest::GetZoneColors { device_id: device_id.to_string(), zone };

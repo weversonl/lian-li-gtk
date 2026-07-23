@@ -1,8 +1,6 @@
 //! Fan curve editor: named temperature→PWM curves, stored in
-//! `AppConfig.fan_curves`. There's no dedicated Save/Delete-curve IPC call —
-//! curves are just entries in the whole `AppConfig`, so editing round-trips
-//! through `GetConfig` → mutate `fan_curves` → `SetConfig` with the full
-//! config (everything else is passed through untouched).
+//! `AppConfig.fan_curves`. No dedicated Save/Delete IPC call — editing
+//! round-trips through `GetConfig` → mutate → `SetConfig`.
 
 use crate::app_prefs::Lang;
 use crate::context::Ctx;
@@ -16,26 +14,17 @@ use lianli_shared::sensors::{SensorInfo, SensorSource};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-/// Canned curve shapes for the "Curve Profile" picker — Custom is just "keep
-/// whatever's there," the other three overwrite `curve.curve` outright when
-/// picked. Values are a starting point, not measured against any specific
-/// hardware — the whole point of still exposing the points underneath (List
-/// or Graph view) is that the user can tweak from here.
+/// Canned curve shapes for the "Curve Profile" picker; Custom keeps whatever's there.
 const PRESET_SILENT: &[(f32, f32)] = &[(30.0, 20.0), (45.0, 25.0), (55.0, 35.0), (65.0, 50.0), (75.0, 70.0), (85.0, 100.0)];
 const PRESET_BALANCED: &[(f32, f32)] = &[(20.0, 20.0), (40.0, 35.0), (55.0, 50.0), (70.0, 70.0), (80.0, 85.0), (90.0, 100.0)];
 const PRESET_PERFORMANCE: &[(f32, f32)] = &[(20.0, 40.0), (35.0, 55.0), (50.0, 70.0), (65.0, 85.0), (75.0, 95.0), (85.0, 100.0)];
 
-/// Curve-graph display domain — fixed rather than derived from the data, so
-/// the axes don't jump around as points move near an edge while dragging.
+/// Fixed graph domain so axes don't jump around while dragging points.
 const GRAPH_MAX_TEMP: f32 = 100.0;
 const GRAPH_MAX_PWM: f32 = 100.0;
-/// How close (in pixels) a click/drag has to land next to a point to grab
-/// it instead of being treated as empty space (add) or a miss (remove).
+/// Pixel radius for grabbing a point vs. adding/missing.
 const POINT_HIT_RADIUS_PX: f64 = 14.0;
 
-/// The "Temperature Source" combo plus its "Custom Command..." entry row —
-/// bundled together since every place that touches one now also needs to
-/// touch the others (selecting Custom Command reveals the entry row).
 #[derive(Clone)]
 struct SourceWidgets {
     row: adw::ComboRow,
@@ -62,12 +51,8 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
     let ctx = ctx.clone();
     glib::spawn_future_local(async move {
         let config_result = ctx.client.call::<AppConfig>(IpcRequest::GetConfig).await;
-        // Best-effort — an empty sensor list just means the "Temperature
-        // Source" picker only offers the System Default fallback, not a
-        // reason to fail loading the whole page. Filtered to actual
-        // temperature readings (`Unit::C`) — `ListSensors` also reports
-        // usage/RPM/rate sensors meant for the Dashboard/LCD sensor pickers,
-        // none of which make sense as a fan curve's °C axis.
+        // Filtered to temperature readings only — ListSensors also reports
+        // usage/RPM/rate sensors meant for other pickers.
         let sensors: Vec<SensorInfo> = ctx
             .client
             .call::<Vec<SensorInfo>>(IpcRequest::ListSensors)
@@ -135,19 +120,13 @@ fn build_editor(
     curve_buttons.append(&delete_curve_button);
     content.append(&curve_buttons);
 
-    // Which sensor this curve's temperature axis actually reads from — e.g.
-    // the AMD GPU's hwmon temp instead of the default CPU thermal zone, for
-    // a curve driving the bottom fans off GPU heat.
     let source_group = adw::PreferencesGroup::builder()
         .title(ctx.t("fc.temp_source"))
         .description(ctx.t("fc.temp_source_desc"))
         .build();
     let source_row = adw::ComboRow::builder().title(ctx.t("fc.sensor")).build();
-    // Hwmon sensor names include the full PCI chip name (e.g. "Advanced
-    // Micro Device, Inc. [AMD/ATI] ...: edge in °C"), which the popover's
-    // fixed row width ellipsizes — a custom factory so each row gets a
-    // tooltip with the untruncated text, since it's otherwise unreadable
-    // for any GPU/chipset entry.
+    // Custom factory so long hwmon sensor names get a tooltip instead of
+    // being ellipsized unreadably.
     let source_item_factory = gtk::SignalListItemFactory::new();
     source_item_factory.connect_setup(|_, list_item| {
         let Some(list_item) = list_item.downcast_ref::<gtk::ListItem>() else { return };
@@ -165,16 +144,9 @@ fn build_editor(
     source_row.set_list_factory(Some(&source_item_factory));
     source_group.add(&source_row);
 
-    // Shown only when "Custom Command..." (the last entry in the sensor
-    // list) is selected — same escape hatch lian-li-linux's own GUI offers,
-    // for anything not covered by an enumerated sensor: a shell command run
-    // via `sh -c`, e.g. a liquidctl readout for coolant temp. Explicit about
-    // the output contract right in the UI, since the daemon's parser
-    // (`read.rs`'s `ResolvedSensor::ShellCommand` arm) is unforgiving: it
-    // takes stdout, splits on whitespace, parses *only the first token* as
-    // an `f32`, and requires it already be in °C (no unit conversion, no
-    // divider) — a command that prints anything else first, or a value in
-    // millidegrees, just fails silently back to nothing.
+    // Shown only when "Custom Command..." is selected: a shell command run
+    // via `sh -c`. The daemon parses only the first whitespace-separated
+    // token of stdout as an `f32` in °C — no unit conversion.
     let command_row = adw::EntryRow::builder().title(ctx.t("fc.command")).visible(false).build();
     let command_help = gtk::Label::builder()
         .label(ctx.t("fc.command_help"))
@@ -190,21 +162,11 @@ fn build_editor(
 
     let source_widgets = SourceWidgets { row: source_row.clone(), command_row: command_row.clone(), command_help };
 
-    // "Curve Profile" — Custom keeps whatever points are already there;
-    // picking one of the other three overwrites `curve.curve` with a canned
-    // shape outright (see the PRESET_* constants). Applying one doesn't lock
-    // anything — the points underneath (List or Graph, whichever's active
-    // below) stay fully editable afterward, same as picking a starting point
-    // to tweak from rather than a fixed mode.
     let profile_group = adw::PreferencesGroup::new();
     let profile_row = adw::ActionRow::builder().title(ctx.t("fc.curve_profile")).build();
     profile_group.add(&profile_row);
     content.append(&profile_group);
 
-    // "View" — List (per-point spin rows, precise numeric entry) vs Graph
-    // (drag points directly on the curve, double-click empty space to add
-    // one, right-click a point to remove it) — the two reference styles the
-    // user asked for, as an either/or rather than picking one permanently.
     let view_group = adw::PreferencesGroup::new();
     let view_row = adw::ActionRow::builder().title(ctx.t("fc.view")).build();
     view_group.add(&view_row);
@@ -222,9 +184,6 @@ fn build_editor(
     let graph_reset_button = gtk::Button::builder().label(ctx.t("fc.restore_default")).halign(gtk::Align::End).build();
     content.append(&graph_area);
     content.append(&graph_reset_button);
-    // Remembers whichever view the user picked last (see `AppPrefs`) —
-    // reopening this page used to always reset to List regardless of an
-    // explicit earlier choice.
     let starts_in_graph = ctx.fan_curve_graph_view();
     points_group.set_visible(!starts_in_graph);
     add_point_button.set_visible(!starts_in_graph);
@@ -265,13 +224,9 @@ fn build_editor(
         });
     }
 
-    // No API to just reselect one of `segmented_control`'s buttons without
-    // re-triggering its `on_change` (which overwrites `curve.curve` with a
-    // preset) — so instead of building this once, `populate_profile_row`
-    // rebuilds it fresh every time the selected curve could have changed,
-    // each time detecting which preset (if any) the curve's current points
-    // actually match. Tracked here so a rebuild can remove the previous one
-    // first (`ActionRow` has no "clear suffix", only `remove(widget)`).
+    // Rebuilt fresh on every curve switch by `populate_profile_row`, since
+    // reselecting a segmented_control button without retriggering
+    // `on_change` isn't possible. Tracked so a rebuild can remove the old one.
     let profile_widget: Rc<RefCell<Option<gtk::Box>>> = Rc::new(RefCell::new(None));
     populate_profile_row(&profile_row, &profile_widget, &config, &selected_curve, &points_list, &graph_area, lang);
 
@@ -279,14 +234,8 @@ fn build_editor(
     scrolled.set_child(Some(&clamp));
     root.append(&scrolled);
 
-    // `populate_source_row` calling `set_selected` to reflect the current
-    // curve's source must not itself be mistaken for the user picking a new
-    // one — the handler below persists whatever's selected, and without
-    // blocking it here, switching to a curve whose sensor isn't in the
-    // enumerated list (e.g. a hand-written `temp_command`, matched to
-    // nothing so `populate_source_row` falls back to index 0) would let the
-    // handler immediately overwrite that curve's real source with "System
-    // Default", silently discarding it just from viewing the page.
+    // Blocked while `populate_source_row` reflects the current curve's
+    // source, so that call isn't mistaken for the user picking a new one.
     let source_handler_id = Rc::new(RefCell::new(None::<glib::SignalHandlerId>));
     {
         let config = config.clone();
@@ -315,14 +264,6 @@ fn build_editor(
                 curve.temp_command.clear();
             }
             drop(cfg);
-            // This handler is blocked (see `populate_source_row`) while the
-            // page reflects an already-saved source, so reaching this point
-            // means the user just picked something — same "you still need
-            // to hit Save" reminder the curve-delete flow already gives,
-            // since this page has no auto-save; picking a sensor and then
-            // closing the app without pressing Save (easy to assume a
-            // dropdown "just saves," unlike the point editor) is exactly
-            // what silently reverted to System Default on next launch.
             if !is_custom_command {
                 ctx.toast(ctx.t("fc.source_changed"));
             }
@@ -504,11 +445,8 @@ fn refresh_curve_list(
     }
 }
 
-/// Rebuilds the "Curve Profile" segmented control, detecting which preset
-/// (if any) the current curve's points exactly match — this used to always
-/// hardcode index 0 ("Personalizado"), so applying "Equilibrado", saving,
-/// leaving the page and coming back showed "Personalizado" again even
-/// though the points were still exactly the balanced preset.
+/// Rebuilds the "Curve Profile" control, detecting which preset (if any)
+/// the current curve's points exactly match.
 fn populate_profile_row(
     profile_row: &adw::ActionRow,
     profile_widget: &Rc<RefCell<Option<gtk::Box>>>,
@@ -566,13 +504,9 @@ fn populate_profile_row(
     *profile_widget.borrow_mut() = Some(widget);
 }
 
-/// Rebuilds the "Temperature Source" combo's model (System Default, every
-/// sensor `ListSensors` reported, then "Custom Command..." last) and
-/// selects whichever one the current curve is actually reading from —
-/// matched against `FanCurve::effective_source()` so a curve saved with only
-/// `temp_command` set (no `temp_source`, e.g. from before this picker
-/// existed) still shows the right entry instead of always falling back to
-/// System Default. Also shows/hides the command entry row to match.
+/// Rebuilds the "Temperature Source" combo's model and selects whichever
+/// entry the current curve is reading from, matched via
+/// `FanCurve::effective_source()`.
 fn populate_source_row(
     source_widgets: &SourceWidgets,
     sensors: &Rc<Vec<SensorInfo>>,
@@ -584,16 +518,9 @@ fn populate_source_row(
     let source_row = &source_widgets.row;
     let custom_command_index = sensors.len() + 1;
 
-    // Block the "user changed the source" handler for this whole rebuild,
-    // not just the final `set_selected` — `set_model` itself resets the
-    // widget's `selected` property (to 0, since the previous selection index
-    // may not even exist in the new model) and fires `notify::selected` for
-    // that reset *before* we ever get a chance to compute and restore the
-    // real value below. Left unblocked, that reset alone was enough to run
-    // the handler with `selected == 0`, which wiped the curve's real
-    // `temp_source` back to `None` — purely from reopening/rebuilding this
-    // page, no click required — which is exactly the "already reverted to
-    // Default" bug this was reported as.
+    // Blocked for the whole rebuild, not just `set_selected` — `set_model`
+    // itself resets `selected` to 0 and fires the signal before the real
+    // value is restored below.
     if let Some(id) = source_handler_id.borrow().as_ref() {
         source_row.block_signal(id);
     }
@@ -636,11 +563,8 @@ fn populate_source_row(
         source_row.unblock_signal(id);
     }
 
-    // Only touch the entry's text when it's actually the active source —
-    // `EntryRow::set_text` fires `connect_changed`, which writes straight
-    // back into the curve's `temp_command`; doing that unconditionally here
-    // would clobber a just-set sensor selection with an empty command the
-    // instant a *different*, non-custom-command curve was selected.
+    // Only touched when active — `set_text` fires `connect_changed`, which
+    // writes into `temp_command` and would clobber a sensor selection.
     let is_custom_command = selected_index == custom_command_index;
     if is_custom_command {
         source_widgets.command_row.set_text(&command_text);
@@ -666,12 +590,7 @@ fn refresh_points(
         return;
     };
 
-    // Sorted in place (not just a local display copy) so `point_index`
-    // below — used by the spin buttons and remove button to index straight
-    // into `curve.curve` — actually matches this ascending order. Points
-    // dragged around in Graph view aren't kept sorted mid-drag (see
-    // `build_curve_graph`'s doc comment), so without this, switching to
-    // List after dragging showed them in whatever order they'd ended up in.
+    // Sorted in place so `point_index` below matches ascending order.
     sort_curve(config, idx);
 
     let points = config
@@ -746,8 +665,6 @@ fn refresh_points(
     }
 }
 
-/// The plot area's pixel rectangle within a `width`×`height` widget —
-/// margins reserved for axis labels on the left/bottom.
 const GRAPH_MARGIN_LEFT: f64 = 42.0;
 const GRAPH_MARGIN_BOTTOM: f64 = 26.0;
 const GRAPH_MARGIN_TOP: f64 = 14.0;
@@ -778,21 +695,14 @@ fn graph_to_data(x: f64, y: f64, plot: (f64, f64, f64, f64)) -> (f32, f32) {
     (temp, pwm)
 }
 
-/// Sorts curve `idx`'s points by temperature ascending, in place. Dragging a
-/// point past another's temperature in Graph view (or hand-typing an
-/// out-of-order value in List view) leaves the underlying `Vec` unsorted —
-/// harmless for drawing (the graph always sorts its own display copy) but
-/// showed up as a visibly out-of-order List whenever the page was reopened
-/// or the view was switched back to List.
+/// Sorts curve `idx`'s points by temperature ascending, in place.
 fn sort_curve(config: &Rc<RefCell<AppConfig>>, idx: usize) {
     if let Some(curve) = config.borrow_mut().fan_curves.get_mut(idx) {
         curve.curve.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     }
 }
 
-/// The nearest point in `curve` to widget-space `(x, y)`, only if it's
-/// within `POINT_HIT_RADIUS_PX` — used by both drag-start (grab a point) and
-/// right-click (remove a point).
+/// Nearest point to widget-space `(x, y)`, within `POINT_HIT_RADIUS_PX`.
 fn graph_hit_test(points: &[(f32, f32)], x: f64, y: f64, plot: (f64, f64, f64, f64)) -> Option<usize> {
     points
         .iter()
@@ -806,15 +716,8 @@ fn graph_hit_test(points: &[(f32, f32)], x: f64, y: f64, plot: (f64, f64, f64, f
         .map(|(i, _)| i)
 }
 
-/// A drag-to-edit visual alternative to the point list ("Graph" in the
-/// View toggle) — same underlying `curve.curve` as the List view. Dragging
-/// an existing point moves it; double-clicking empty space adds one at that
-/// spot; right-clicking a point removes it (a curve is kept at 2+ points so
-/// there's always a line to show). Every mutation here calls `queue_draw`
-/// itself but does *not* rebuild the List view — callers that also care
-/// about List staying in sync (there are none right now, since switching to
-/// this view hides List entirely) would need to thread that through same as
-/// `refresh_points` does the other way.
+/// Drag-to-edit curve graph. Drag moves a point, double-click adds one,
+/// right-click removes one (kept at 2+ points). Doesn't rebuild the List view.
 fn build_curve_graph(config: &Rc<RefCell<AppConfig>>, selected_curve: &Rc<RefCell<Option<usize>>>) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::builder().content_height(260).hexpand(true).vexpand(false).build();
 
@@ -867,9 +770,7 @@ fn build_curve_graph(config: &Rc<RefCell<AppConfig>>, selected_curve: &Rc<RefCel
             }
             let _ = cr.stroke();
 
-            // Dotted extension holding the last point's PWM% out to the
-            // right edge — matches the reference image and makes clear the
-            // curve doesn't just stop at the last configured temperature.
+            // Dotted extension of the last point's PWM% to the right edge.
             if let Some(&(last_temp, last_pwm)) = points.last() {
                 let (lx, ly) = graph_to_pixel(last_temp, last_pwm, plot);
                 cr.set_dash(&[4.0, 4.0], 0.0);

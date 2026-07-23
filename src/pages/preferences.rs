@@ -1,15 +1,9 @@
 //! Preferences window: General (daemon status, OpenRGB port, language) and
 //! Saved Presets (delete-only management of `RgbPreset`s).
 //!
-//! Deleting a preset here only ever sends `DeleteRgbPreset` — confirmed
-//! against the daemon source (`ipc_server.rs::handle_request`, the
-//! `DeleteRgbPreset` arm) that this is a catalog-only operation: it retains
-//! the presets Vec minus the deleted entry and rewrites `rgb_presets.json`,
-//! nothing else. It never touches `AppConfig`, never calls
-//! `RgbController::apply_config`, and never sends a device command. So a
-//! deleted preset does not reset the hardware — whatever effect is
-//! currently running (e.g. set once via the RGB Editor or Windows/L-Connect
-//! before this app ever touched the device) keeps running untouched.
+//! Deleting a preset only sends `DeleteRgbPreset`, a catalog-only operation
+//! — it never touches `AppConfig` or sends a device command, so it doesn't
+//! reset whatever effect is currently running on the hardware.
 
 use crate::app_prefs::Lang;
 use crate::context::Ctx;
@@ -54,7 +48,6 @@ fn general_page(ctx: &Rc<Ctx>) -> adw::PreferencesPage {
     daemon_group.add(&port_row);
     page.add(&daemon_group);
 
-    // Applied at next launch, not live — see `Lang`'s doc comment.
     let lang_group = adw::PreferencesGroup::new();
     let lang_row = adw::ActionRow::builder()
         .title(ctx.t("prefs.language"))
@@ -66,11 +59,7 @@ fn general_page(ctx: &Rc<Ctx>) -> adw::PreferencesPage {
         let ctx = ctx.clone();
         lang_row.add_suffix(&segmented_control::build(&lang_names, initial_lang_index, move |i| {
             let new_lang = if i == 1 { Lang::PtBr } else { Lang::En };
-            // `segmented_control::build` activates the initially-selected
-            // button as part of constructing it, which fires this same
-            // callback once up front — skip it when nothing actually
-            // changed, otherwise just opening Preferences popped the
-            // restart toast every time.
+            // Skip the initial-selection callback fired by `build` itself.
             if new_lang == ctx.lang() {
                 return;
             }
@@ -100,9 +89,6 @@ fn general_page(ctx: &Rc<Ctx>) -> adw::PreferencesPage {
     background_group.add(&autostart_row);
     page.add(&background_group);
 
-    // "First in order" here refers to whatever ends up first after
-    // `Ctx::sort_by_saved_order` (the same ▲▼ reordering the sidebar itself
-    // now supports) — not the daemon's own (unstable) device listing order.
     let startup_group = adw::PreferencesGroup::builder().title(ctx.t("prefs.startup")).build();
     let default_device_row = adw::ComboRow::builder()
         .title(ctx.t("prefs.default_device"))
@@ -137,9 +123,6 @@ fn general_page(ctx: &Rc<Ctx>) -> adw::PreferencesPage {
     let ctx = ctx.clone();
     glib::spawn_future_local(async move {
         match ctx.client.call::<serde_json::Value>(IpcRequest::Ping).await {
-            // AdwActionRow subtitles render Pango markup, but plain "●
-            // Running" text has no color of its own — it just inherits the
-            // dim subtitle gray, so "Running" never actually looked green.
             Ok(_) => status_row.set_subtitle(&format!("<span foreground=\"#33d17a\">{}</span>", ctx.t("prefs.running"))),
             Err(_) => status_row.set_subtitle(&format!("<span foreground=\"#e01b24\">{}</span>", ctx.t("prefs.unreachable"))),
         }

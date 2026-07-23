@@ -16,17 +16,9 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 pub fn build_ui(app: &adw::Application) {
-    // `GApplication` already guarantees only one *process* ever runs for
-    // this `application_id` (a second `lian-li-gtk` invocation — another
-    // `cargo run`, clicking the launcher again, whatever — just sends
-    // "activate" over D-Bus to the existing process and exits immediately;
-    // that part always worked). What didn't: `activate` fires on *every*
-    // one of those calls, including ones routed to an already-running
-    // process, and this function used to rebuild an entire second window
-    // (plus a second IPC connection, a second telemetry poll loop, a
-    // second tray icon...) every single time — which is what actually
-    // looked like "it keeps opening new instances" from the outside, even
-    // though it was really always the same one process piling up windows.
+    // GApplication routes a second launch to this same process via D-Bus,
+    // but still fires `activate` every time — reuse the existing window
+    // instead of building a second one.
     if let Some(window) = app.active_window() {
         window.present();
         return;
@@ -37,10 +29,6 @@ pub fn build_ui(app: &adw::Application) {
     let client = IpcClient::new();
     let state = new_shared_state();
 
-    // Loaded once, up front — this same `AppPrefs` (and the `lang` inside
-    // it) is what `Ctx` gets constructed with below, since several widgets
-    // here need a translated string before `Ctx` (and its `t()` helper)
-    // exist yet.
     let app_prefs = crate::app_prefs::load();
     let lang = app_prefs.lang;
 
@@ -60,29 +48,15 @@ pub fn build_ui(app: &adw::Application) {
 
     let sidebar_toolbar = adw::ToolbarView::new();
     let sidebar_header = adw::HeaderBar::new();
-    // Manual refresh, matching the reference app's sidebar header —
-    // otherwise redundant with the 1s poll, but it's what "loading now"
-    // looks like in that design instead of a silent wait.
     let refresh_button = gtk::Button::from_icon_name("view-refresh-symbolic");
     refresh_button.set_tooltip_text(Some(crate::i18n::t(lang, "sidebar.refresh")));
-    // Global Effects touches every RGB device at once — it isn't a
-    // per-device action, so it lives here as one global entry point
-    // instead of showing up as a card on each device's page.
     let sync_button = gtk::Button::from_icon_name("preferences-desktop-display-symbolic");
     sync_button.set_tooltip_text(Some(crate::i18n::t(lang, "sidebar.global_effects")));
-    // Same reasoning as Global Effects: pairing isn't really "about" the
-    // currently-selected device (it manages the whole dongle), so it moved
-    // out of each wireless device's Quick Actions into one global entry
-    // point too.
     let wireless_button = gtk::Button::from_icon_name("network-wireless-symbolic");
     wireless_button.set_tooltip_text(Some(crate::i18n::t(lang, "sidebar.wireless_pairing")));
     sidebar_header.pack_end(&sync_button);
     sidebar_header.pack_end(&wireless_button);
     sidebar_header.pack_end(&refresh_button);
-    // `AdwHeaderBar` centers its title by default (picked up automatically
-    // from `sidebar_page`'s title below) — a custom title widget overrides
-    // that with a plain left-aligned label instead, matching the reference
-    // app's sidebar header instead of GNOME's usual centered-title look.
     let sidebar_title = gtk::Label::builder()
         .label(crate::i18n::t(lang, "sidebar.title"))
         .css_classes(["title"])
@@ -91,9 +65,6 @@ pub fn build_ui(app: &adw::Application) {
     sidebar_header.set_title_widget(Some(&sidebar_title));
     sidebar_toolbar.add_top_bar(&sidebar_header);
 
-    // Preferences lives as a footer row below the device list — the
-    // reference app's bottom-left "Preferências" row — instead of a header
-    // icon.
     let prefs_row = adw::ActionRow::builder().title(crate::i18n::t(lang, "sidebar.preferences")).activatable(true).build();
     prefs_row.add_prefix(&gtk::Image::from_icon_name("preferences-system-symbolic"));
     let sidebar_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -109,8 +80,6 @@ pub fn build_ui(app: &adw::Application) {
     detail_toolbar.add_top_bar(&detail_header);
     detail_toolbar.set_content(Some(&detail_box));
 
-    // "LianLiGTK" is the app's own name, not a translated phrase — it
-    // stays the same in both languages the same way a product name would.
     let dashboard_page = adw::NavigationPage::builder()
         .title("LianLiGTK")
         .tag("dashboard")
@@ -166,13 +135,8 @@ pub fn build_ui(app: &adw::Application) {
         });
     }
 
-    // Closing the window just hides it instead of ending the process — the
-    // daemon connection and telemetry polling keep running, and the tray
-    // icon (or relaunching the app, which GApplication just re-presents)
-    // is what actually brings it back or quits for real. Without a tray
-    // icon available (e.g. no AppIndicator extension on this GNOME
-    // session), this still works fine, just with no obvious way back in
-    // besides relaunching — no worse than before this existed.
+    // Closing just hides the window; the tray (or relaunching) brings it
+    // back or quits for real.
     {
         let window = window.clone();
         let ctx = ctx.clone();
@@ -183,9 +147,6 @@ pub fn build_ui(app: &adw::Application) {
         });
     }
 
-    // Tray runs on its own thread (see `tray.rs`'s doc comment) — every
-    // click there just posts a `TrayEvent` through this channel, read back
-    // here on the main thread where it's actually safe to touch `window`.
     let (tray_tx, tray_rx) = async_channel::unbounded::<crate::tray::TrayEvent>();
     crate::tray::spawn(tray_tx, ctx.lang());
     {
@@ -233,20 +194,11 @@ pub fn build_ui(app: &adw::Application) {
     let devices_for_select: Rc<RefCell<Vec<DeviceInfo>>> = Rc::new(RefCell::new(Vec::new()));
     let selected_device_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
-    // Renaming a device (cosmetic, local-only) doesn't change the set of
-    // known device_ids, so the sidebar-rebuild-on-device-change check below
-    // would otherwise never notice it — this flag forces one rebuild.
+    // Forces a sidebar rebuild for a rename, which doesn't change device_ids.
     let names_dirty: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 
-    // rebuild_sidebar's own `list.select_row(...)` call (restoring whatever
-    // was selected before the rebuild) fires this same row-selected signal.
-    // Binding/unbinding a wireless device changes its device_id
-    // (`wireless-unbound:<mac>` <-> `wireless:<mac>`), so a rebuild
-    // triggered by that could "reselect" what looks like a different
-    // device purely because of the ID change — without this flag, that was
-    // read as a genuine device switch and popped the nav stack back to the
-    // Dashboard, kicking the user out of Wireless Pairing (or any other
-    // sub-page) right after a bind/unbind for no reason the user asked for.
+    // Suppresses the nav-pop-to-dashboard when a sidebar rebuild reselects
+    // the same device under a changed id (bind/unbind changes the prefix).
     let suppress_nav_pop: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 
     {
@@ -267,12 +219,6 @@ pub fn build_ui(app: &adw::Application) {
                 return;
             }
             if let Some(device) = devices_for_select.borrow().get(index as usize) {
-                // Only jump back to the Dashboard for an actual device
-                // change — this handler also re-fires when a background
-                // sidebar rebuild re-selects the *same* device (e.g. after
-                // a rename, or a reconnect that didn't change who's
-                // selected), and popping the nav stack then would boot the
-                // user out of whatever sub-page they're on for no reason.
                 let is_device_change = selected_device_id.borrow().as_deref() != Some(device.device_id.as_str());
                 if is_device_change && !suppress_nav_pop.get() {
                     ctx.nav.pop_to_tag("dashboard");
@@ -295,46 +241,24 @@ pub fn build_ui(app: &adw::Application) {
     let names_dirty_for_update = names_dirty.clone();
     let suppress_nav_pop_for_update = suppress_nav_pop.clone();
     let on_update: Rc<dyn Fn()> = Rc::new(move || {
-        // Sorted by the user's saved order (see `Ctx::sort_by_saved_order`)
-        // *before* anything else touches it — this is also what fixes the
-        // "have to click the first device 3+ times" bug: `ListDevices`
-        // doesn't guarantee a stable order between calls (it can reshuffle
-        // from one 1s poll to the next even when the exact same devices are
-        // still connected), and the raw order used to feed `new_ids`
-        // directly below, so a harmless reshuffle alone was enough to look
-        // like "the device set changed" and trigger a full sidebar
-        // rebuild — tearing down and recreating every row, including
-        // whichever one the user's click was about to land on.
+        // Sorted first: `ListDevices` doesn't guarantee stable order between
+        // polls, so comparing the raw order alone triggered spurious sidebar
+        // rebuilds even when the device set hadn't changed.
         let devices = ctx_for_update.sort_by_saved_order(state_for_update.borrow().devices.clone());
         let telemetry = state_for_update.borrow().telemetry.clone();
-        // Sorted independently of `devices`'s own (meaningful) display
-        // order — this copy exists purely to answer "did the set of
-        // connected devices actually change", so a reorder (either from the
-        // sidebar's own ▲▼ buttons or daemon-side jitter among devices with
-        // no saved position yet) never counts as a change here on its own.
+        // Sorted independently of display order, so a reorder alone never
+        // counts as "the device set changed".
         let mut new_ids: Vec<String> = devices.iter().map(|d| d.device_id.clone()).collect();
         new_ids.sort();
 
         if *known_ids.borrow() != new_ids || names_dirty_for_update.get() {
-            // Snapshot-and-drop the borrow *before* calling rebuild_sidebar:
-            // removing the currently-selected row from the ListBox fires
-            // GtkListBox's "row-selected" signal synchronously with row=None,
-            // which re-enters this same RefCell via the row-selected handler
-            // below. Passing a live `Ref` in would double-borrow it and abort
-            // the process (this can't unwind — it's across a GTK/C callback
-            // boundary) instead of panicking recoverably.
+            // Dropped before rebuild_sidebar: removing the selected row
+            // fires "row-selected" synchronously with row=None, re-entering
+            // this same RefCell.
             let selected_snapshot = selected_device_id_for_update.borrow().clone();
-            // Written *before* the rebuild, not after: `rebuild_sidebar`
-            // auto-selects a row synchronously (first-ever population, or
-            // the "Default device" fallback), which fires the row-selected
-            // handler immediately — and that handler reads this same
-            // `devices_for_update` to look up which `DeviceInfo` to render.
-            // With the old order (write after rebuild), that very first
-            // auto-selection always looked up an empty/stale list and
-            // silently found nothing, so the app opened with a row visibly
-            // highlighted in the sidebar but "Select a device" still
-            // showing on the right — needing an actual manual click
-            // (which reads the by-then-populated list) to show anything.
+            // Written before the rebuild: rebuild_sidebar auto-selects a row
+            // synchronously, and that fires the row-selected handler, which
+            // reads this same map to look up the DeviceInfo to render.
             *devices_for_update.borrow_mut() = devices.clone();
             rebuild_sidebar(
                 &sidebar_list_for_update,
@@ -397,9 +321,6 @@ pub fn build_ui(app: &adw::Application) {
         start_polling(ctx.client.clone(), state, move || on_update());
     }
 
-    // Set by the autostart `.desktop` entry (see `autostart.rs`) — landing
-    // straight in the tray on login, not popping the window in the user's
-    // face before they've asked for it.
     let start_hidden = std::env::args().any(|arg| arg == "--start-hidden");
     if !start_hidden {
         window.present();
@@ -425,10 +346,8 @@ fn rebuild_sidebar(
         list.remove(&child);
     }
 
-    // Shared with the ▲▼ reorder buttons below — clicking one mutates this,
-    // persists it via `ctx.set_device_order`, and rebuilds from it, so a
-    // reorder is reflected immediately instead of waiting for the next 1s
-    // poll tick to pick the saved order back up.
+    // Shared with the ▲▼ reorder buttons: mutated, persisted, and rebuilt
+    // from immediately on click.
     let ordered_devices: Rc<RefCell<Vec<DeviceInfo>>> = Rc::new(RefCell::new(devices.to_vec()));
 
     let mut row_to_select: Option<gtk::ListBoxRow> = None;
@@ -483,10 +402,7 @@ fn rebuild_sidebar(
             action_row.add_suffix(&up_button);
             action_row.add_suffix(&down_button);
 
-            // Drag-and-drop reordering, as an alternative to ▲▼ — a small
-            // handle so the drag gesture doesn't fight the row's own click-
-            // to-select (dragging from anywhere on the row would eat the
-            // click meant to just open that device).
+            // A small drag handle so dragging doesn't fight click-to-select.
             let handle = gtk::Image::from_icon_name("list-drag-handle-symbolic");
             handle.set_css_classes(&["sidebar-drag-handle"]);
             handle.set_valign(gtk::Align::Center);
@@ -539,10 +455,8 @@ fn rebuild_sidebar(
         }
     }
 
-    // Nothing was already selected (first-ever population, or the
-    // previously-selected device disconnected) — prefer the explicit
-    // "Default device" from Preferences if it's actually present, otherwise
-    // fall back to whatever ended up first in the (now-stable) order above.
+    // Nothing selected yet — prefer the "Default device" from Preferences,
+    // else the first row in order.
     let row_to_select = row_to_select.or_else(|| {
         let default_index = ctx
             .default_device_id()
@@ -550,17 +464,13 @@ fn rebuild_sidebar(
         list.row_at_index(default_index.unwrap_or(0) as i32)
     });
     if let Some(row) = row_to_select {
-        // Bracket the signal this fires synchronously so the row-selected
-        // handler can tell this apart from a genuine user click.
         suppress_nav_pop.set(true);
         list.select_row(Some(&row));
         suppress_nav_pop.set(false);
     }
 }
 
-/// RGB-only cable/strip/ring families — no fan blade, no pump, no LCD, so
-/// none of `has_lcd`/`has_pump`/the fan-icon fallback actually describe
-/// them (a Strimer cable is not a fan).
+/// RGB-only cable/strip/ring families — no fan blade, pump, or LCD.
 fn is_cable_family(family: DeviceFamily) -> bool {
     matches!(
         family,
@@ -573,11 +483,6 @@ fn is_cable_family(family: DeviceFamily) -> bool {
 }
 
 fn build_device_row(device: &DeviceInfo, display_name: &str, ctx: &Rc<Ctx>) -> gtk::Widget {
-    // AdwActionRow's subtitle renders Pango markup (see the same pattern in
-    // `preferences.rs`'s "Daemon Status" row) — plain "Connected"/"Unpaired"
-    // text has no color of its own, it just inherits the dim subtitle gray,
-    // so it never actually looked "green = good" the way a status dot does
-    // elsewhere in the app.
     let subtitle = if device.is_unbound_wireless {
         format!("<span foreground=\"#e5a50a\">● {}</span>", ctx.t("sidebar.unpaired"))
     } else {
@@ -585,12 +490,7 @@ fn build_device_row(device: &DeviceInfo, display_name: &str, ctx: &Rc<Ctx>) -> g
     };
     let row = adw::ActionRow::builder().title(glib::markup_escape_text(display_name)).subtitle(subtitle).build();
 
-    // Custom SVGs for fan and cable — Adwaita has neither (see `FAN_SVG`/
-    // `CABLE_SVG`'s doc comments); "fan-symbolic" doesn't actually exist in
-    // Adwaita's icon set at all (GTK was silently falling back to its
-    // generic "icon not found" glyph, the circle-with-a-slash, which read
-    // as if the app were broken). LCD/pump devices keep real Adwaita icons
-    // since those fit well enough already.
+    // Custom SVGs for fan/cable — Adwaita has no icon for either.
     let icon: gtk::Image = if device.has_lcd {
         gtk::Image::from_icon_name("video-display-symbolic")
     } else if device.has_pump {
@@ -617,18 +517,8 @@ fn humanize_family(family: DeviceFamily) -> String {
     out
 }
 
-/// A rotating-beacon "siren" glyph — Adwaita/GNOME's icon set has nothing
-/// like it (closest is `alarm-symbolic`, an alarm clock, which read as
-/// exactly that: a clock, not an alert light). Rendered in the same yellow
-/// the Identify blink itself uses, so the icon visually previews what the
-/// button is about to do.
-// Rasterized at 128×128 (viewBox stays 0-16 so every coordinate below is
-// unchanged) even though it's only ever displayed at 16px — `Texture`
-// decodes an SVG once at its declared width/height and GTK then scales that
-// raster to fit `set_pixel_size`, so a 16px-intrinsic texture had to be
-// upscaled on any HiDPI display (or even at 1x, depending on how the
-// compositor rounds it), which is what read as blurry. Downscaling from a
-// much higher-resolution raster instead keeps it crisp everywhere.
+/// Rotating-beacon "siren" glyph, in the Identify blink's yellow. Rasterized
+/// at 128×128 (viewBox stays 0-16) so it stays crisp at the 16px display size.
 const SIREN_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 16 16" fill="none" stroke="#f6d32d" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round">
 <path d="M8 0.5 V2"/>
 <path d="M3.5 2 L4.6 3.1"/>
@@ -640,13 +530,8 @@ const SIREN_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="128" 
 <path d="M5.5 12 H10.5"/>
 </svg>"##;
 
-/// A 3-blade pinwheel — Adwaita has no fan icon at all (see `is_cable_family`
-/// and `build_device_row`'s doc comment on why the built-in icon set kept
-/// coming up short here). Neutral gray rather than a theme accent, since
-/// there's no particular semantic color for "this is a fan" the way yellow
-/// meant something for the Identify blink. Also reused as-is for the tray
-/// icon (see `tray.rs`) — same glyph the device sidebar already uses,
-/// rather than the app's separate brand icon.
+/// A 3-blade pinwheel — Adwaita has no fan icon. Also reused for the tray
+/// icon (see `tray.rs`).
 pub(crate) const FAN_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 16 16" fill="none" stroke="#9a9996" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
 <circle cx="8" cy="8" r="6.5"/>
 <path d="M8 8 C6.6 6.9 6.6 4.1 8 2.2 C9.4 4.1 9.4 6.9 8 8 Z" transform="rotate(0 8 8)"/>
@@ -655,17 +540,12 @@ pub(crate) const FAN_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" wid
 <circle cx="8" cy="8" r="1.2" fill="#9a9996"/>
 </svg>"##;
 
-/// A USB-C plug (the stadium-shaped connector housing) at the end of a
-/// short cable — for Strimer/LED-strip devices, which have no fan blade to
-/// draw at all (see `is_cable_family`).
+/// USB-C plug at the end of a short cable, for Strimer/LED-strip devices.
 const CABLE_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 16 16" fill="none" stroke="#9a9996" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round">
 <path d="M1 8 H4"/>
 <rect x="4" y="5.5" width="10.5" height="5" rx="2.5"/>
 </svg>"##;
 
-/// Rasterizes `svg` (see `SIREN_SVG`'s doc comment on why 128×128 for a
-/// 16px-displayed icon) into a `gtk::Image`, falling back to a named system
-/// icon if the SVG loader isn't available for some reason.
 fn svg_icon(svg: &'static str, fallback_icon_name: &str) -> gtk::Image {
     let bytes = glib::Bytes::from_static(svg.as_bytes());
     match gtk::gdk::Texture::from_bytes(&bytes) {
@@ -723,11 +603,6 @@ fn render_device_detail(
     title_row.append(&spacer);
 
     if device.has_rgb {
-        // `Button`'s `icon-name` and `label` builder properties both just
-        // set the button's one child, so whichever was applied last quietly
-        // wins — setting both here previously left the button text-only
-        // with no icon at all. A custom icon+label child box is the way to
-        // actually show both together.
         let identify_content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         identify_content.append(&siren_icon());
         identify_content.append(&gtk::Label::new(Some(ctx.t("dashboard.identify"))));
@@ -808,10 +683,6 @@ fn build_stats_grid(device: &DeviceInfo, telemetry: &TelemetrySnapshot, ctx: &Rc
         stats.push((ctx.t("dashboard.coolant_temp"), format!("{temp:.1} °C")));
     }
 
-    // Whatever this app last applied to the device — from RGB Editor or
-    // Global Effects, whichever happened most recently — rather than the
-    // static "RGB Zones" count, which was accurate but not very useful to
-    // see at a glance.
     if device.has_rgb {
         if let Some(effect) = ctx.last_effect_for(&device.device_id) {
             stats.push((ctx.t("dashboard.current_effect"), effect.mode().display_name().to_string()));
@@ -829,11 +700,6 @@ fn build_stats_grid(device: &DeviceInfo, telemetry: &TelemetrySnapshot, ctx: &Rc
         .build();
 
     for (label, value) in stats {
-        // NB: margins on `card` itself would only push it away from its
-        // siblings (outer spacing) — they don't add inner padding around
-        // its content, which is why this was rendering with the text
-        // flush against the card edges. The padding has to go on the
-        // children instead.
         let card = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(4)
@@ -906,10 +772,7 @@ fn nav_action_row(
     row
 }
 
-/// Small green-check pills, one per capability the device actually has —
-/// replaces a 4-row boxed list that always showed every capability
-/// (including the unsupported ones as a plain X), which took up far more
-/// vertical space than this information warranted.
+/// Small green-check pills, one per capability the device actually has.
 fn build_capability_chips(device: &DeviceInfo, ctx: &Rc<Ctx>) -> Option<gtk::Widget> {
     let supported: Vec<&str> = [
         (ctx.t("dashboard.cap_fan"), device.has_fan),
@@ -958,10 +821,7 @@ fn build_capability_chips(device: &DeviceInfo, ctx: &Rc<Ctx>) -> Option<gtk::Wid
     Some(container.upcast())
 }
 
-/// Prompts for a new local nickname for `device_id`. Purely cosmetic — see
-/// `crate::device_names` — so there's no daemon round-trip here, just a
-/// write to the local JSON file and a flag telling the next poll tick to
-/// refresh the sidebar with it.
+/// Prompts for a new local nickname for `device_id` — see `crate::device_names`.
 fn open_rename_dialog(
     parent: &gtk::Window,
     ctx: &Rc<Ctx>,
@@ -1005,21 +865,9 @@ fn open_rename_dialog(
     dialog.present(Some(parent));
 }
 
-/// Loads app-wide CSS. Currently just the ".fps-warning-zone" class used by
-/// the Global Effects FPS slider: a soft yellow tint over the trough past
-/// 60fps when "Over 60fps" is enabled — not a hard technical ceiling (the
-/// daemon doesn't validate `interval_ms` at all), just a quiet visual nudge
-/// that this range hasn't been confirmed to look any smoother in practice.
 fn load_app_css() {
     let provider = gtk::CssProvider::new();
     // 60fps sits at (60-5)/(120-5) ≈ 47.8% of the extended 5-120 range.
-    //
-    // The `.segmented-pill` / row rules below force a compact density —
-    // recent libadwaita versions default to noticeably taller rows/buttons
-    // (larger touch targets) than the reference app this project's visual
-    // style is modeled on. Left unstyled, `GtkToggleButton`s in the
-    // segmented control inherit that larger default sizing with no upper
-    // bound, which is why they were rendering oversized.
     provider.load_from_string(
         ".fps-warning-zone trough { \
             background-image: linear-gradient(to right, \

@@ -1,11 +1,7 @@
 //! Async client for the lianli-daemon Unix socket IPC protocol.
 //!
-//! Protocol: newline-delimited JSON. Each request line gets exactly one
-//! response line back, in order — the daemon reads requests off a connection
-//! sequentially and writes a response after each one (see
-//! `lianli-daemon/src/ipc_server.rs::handle_connection`). There is no request
-//! id to correlate out-of-order replies, so every call here opens a fresh
-//! connection, sends one line, reads one line, and closes.
+//! Newline-delimited JSON, one response per request, no request id — so
+//! every call opens a fresh connection, sends one line, reads one line.
 
 use anyhow::{bail, Context, Result};
 use async_net::unix::UnixStream;
@@ -28,15 +24,12 @@ impl IpcClient {
         }
     }
 
-    /// Send a request and deserialize the `data` payload of an `ok` response
-    /// into `T`. Errors if the daemon is unreachable or returns `status: error`.
     pub async fn call<T: DeserializeOwned>(&self, request: IpcRequest) -> Result<T> {
         let value = self.call_raw(request).await?;
         serde_json::from_value(value).context("unexpected response shape from daemon")
     }
 
-    /// Same as `call`, but for requests whose response payload is `null`
-    /// (fire-and-forget style commands like `SetRgbEffect`).
+    /// Same as `call`, for requests with a `null` response payload.
     pub async fn call_unit(&self, request: IpcRequest) -> Result<()> {
         self.call_raw(request).await?;
         Ok(())

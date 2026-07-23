@@ -18,20 +18,13 @@ pub struct AppState {
     pub devices: Vec<DeviceInfo>,
     pub telemetry: TelemetrySnapshot,
     pub presets: Vec<RgbPreset>,
-    /// device_ids seen on the previous poll; used to detect new connections
-    /// for "Keep devices in sync" without relying on the (unimplemented)
-    /// `Subscribe` push-event path.
-    ///
-    /// Not wired up yet — the Sync Rainbow page's "Keep devices in sync"
-    /// toggle currently only reapplies on manual "Apply to All Devices"
-    /// clicks. Auto-reapply on new-device-connected is a follow-up.
+    /// Unused — reserved for detecting newly-connected devices.
     #[allow(dead_code)]
     known_device_ids: HashSet<String>,
 }
 
 pub type SharedState = Rc<RefCell<AppState>>;
 
-/// Devices newly seen since the last poll (for "Keep devices in sync").
 #[allow(dead_code)]
 pub fn diff_new_devices(state: &SharedState, previous: &HashSet<String>) -> Vec<String> {
     state
@@ -47,18 +40,14 @@ pub fn new_shared_state() -> SharedState {
     Rc::new(RefCell::new(AppState::default()))
 }
 
-/// Starts the background polling loop: refreshes device list + telemetry
-/// every second, and presets on a slower cadence. Call once at startup.
-///
-/// `on_update` fires after each successful poll so views can re-render.
+/// Polls device list + telemetry every second; `on_update` fires after each
+/// successful poll. Call once at startup.
 pub fn start_polling(
     client: IpcClient,
     state: SharedState,
     on_update: impl Fn() + 'static,
 ) {
     glib::spawn_future_local(async move {
-        // Presets change rarely; refresh once up front and again whenever a
-        // save/delete happens elsewhere (those call sites refresh directly).
         if let Ok(presets) = client.call::<Vec<RgbPreset>>(IpcRequest::ListRgbPresets).await {
             state.borrow_mut().presets = presets;
         }
@@ -86,7 +75,6 @@ pub fn start_polling(
     });
 }
 
-/// Re-fetches the preset list immediately (call after Save/Delete/Apply).
 #[allow(dead_code)]
 pub async fn refresh_presets(client: &IpcClient, state: &SharedState) -> anyhow::Result<()> {
     let presets = client.call::<Vec<RgbPreset>>(IpcRequest::ListRgbPresets).await?;
