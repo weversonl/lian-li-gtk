@@ -13,10 +13,25 @@ use gtk::glib;
 use lianli_shared::device_id::DeviceFamily;
 use lianli_shared::ipc::{DeviceInfo, TelemetrySnapshot};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::rc::Rc;
 
 pub fn build_ui(app: &adw::Application) {
+    // `GApplication` already guarantees only one *process* ever runs for
+    // this `application_id` (a second `lian-li-gtk` invocation — another
+    // `cargo run`, clicking the launcher again, whatever — just sends
+    // "activate" over D-Bus to the existing process and exits immediately;
+    // that part always worked). What didn't: `activate` fires on *every*
+    // one of those calls, including ones routed to an already-running
+    // process, and this function used to rebuild an entire second window
+    // (plus a second IPC connection, a second telemetry poll loop, a
+    // second tray icon...) every single time — which is what actually
+    // looked like "it keeps opening new instances" from the outside, even
+    // though it was really always the same one process piling up windows.
+    if let Some(window) = app.active_window() {
+        window.present();
+        return;
+    }
+
     load_app_css();
 
     let client = IpcClient::new();
@@ -140,7 +155,7 @@ pub fn build_ui(app: &adw::Application) {
         rgb_prefs: Rc::new(RefCell::new(crate::device_rgb_prefs::load())),
         device_order: Rc::new(RefCell::new(crate::device_order::load())),
         app_prefs: Rc::new(RefCell::new(app_prefs)),
-        last_effect: Rc::new(RefCell::new(HashMap::new())),
+        last_effect: Rc::new(RefCell::new(crate::last_effect::load())),
         editor_snapshots: Rc::new(RefCell::new(crate::editor_snapshots::load())),
     });
 
@@ -280,9 +295,25 @@ pub fn build_ui(app: &adw::Application) {
     let names_dirty_for_update = names_dirty.clone();
     let suppress_nav_pop_for_update = suppress_nav_pop.clone();
     let on_update: Rc<dyn Fn()> = Rc::new(move || {
-        let devices = state_for_update.borrow().devices.clone();
+        // Sorted by the user's saved order (see `Ctx::sort_by_saved_order`)
+        // *before* anything else touches it — this is also what fixes the
+        // "have to click the first device 3+ times" bug: `ListDevices`
+        // doesn't guarantee a stable order between calls (it can reshuffle
+        // from one 1s poll to the next even when the exact same devices are
+        // still connected), and the raw order used to feed `new_ids`
+        // directly below, so a harmless reshuffle alone was enough to look
+        // like "the device set changed" and trigger a full sidebar
+        // rebuild — tearing down and recreating every row, including
+        // whichever one the user's click was about to land on.
+        let devices = ctx_for_update.sort_by_saved_order(state_for_update.borrow().devices.clone());
         let telemetry = state_for_update.borrow().telemetry.clone();
-        let new_ids: Vec<String> = devices.iter().map(|d| d.device_id.clone()).collect();
+        // Sorted independently of `devices`'s own (meaningful) display
+        // order — this copy exists purely to answer "did the set of
+        // connected devices actually change", so a reorder (either from the
+        // sidebar's own ▲▼ buttons or daemon-side jitter among devices with
+        // no saved position yet) never counts as a change here on its own.
+        let mut new_ids: Vec<String> = devices.iter().map(|d| d.device_id.clone()).collect();
+        new_ids.sort();
 
         if *known_ids.borrow() != new_ids || names_dirty_for_update.get() {
             // Snapshot-and-drop the borrow *before* calling rebuild_sidebar:
@@ -293,6 +324,18 @@ pub fn build_ui(app: &adw::Application) {
             // the process (this can't unwind — it's across a GTK/C callback
             // boundary) instead of panicking recoverably.
             let selected_snapshot = selected_device_id_for_update.borrow().clone();
+            // Written *before* the rebuild, not after: `rebuild_sidebar`
+            // auto-selects a row synchronously (first-ever population, or
+            // the "Default device" fallback), which fires the row-selected
+            // handler immediately — and that handler reads this same
+            // `devices_for_update` to look up which `DeviceInfo` to render.
+            // With the old order (write after rebuild), that very first
+            // auto-selection always looked up an empty/stale list and
+            // silently found nothing, so the app opened with a row visibly
+            // highlighted in the sidebar but "Select a device" still
+            // showing on the right — needing an actual manual click
+            // (which reads the by-then-populated list) to show anything.
+            *devices_for_update.borrow_mut() = devices.clone();
             rebuild_sidebar(
                 &sidebar_list_for_update,
                 &devices,
@@ -300,7 +343,6 @@ pub fn build_ui(app: &adw::Application) {
                 &ctx_for_update,
                 &suppress_nav_pop_for_update,
             );
-            *devices_for_update.borrow_mut() = devices.clone();
             *known_ids.borrow_mut() = new_ids;
             names_dirty_for_update.set(false);
         } else {
@@ -383,10 +425,113 @@ fn rebuild_sidebar(
         list.remove(&child);
     }
 
+    // Shared with the ▲▼ reorder buttons below — clicking one mutates this,
+    // persists it via `ctx.set_device_order`, and rebuilds from it, so a
+    // reorder is reflected immediately instead of waiting for the next 1s
+    // poll tick to pick the saved order back up.
+    let ordered_devices: Rc<RefCell<Vec<DeviceInfo>>> = Rc::new(RefCell::new(devices.to_vec()));
+
     let mut row_to_select: Option<gtk::ListBoxRow> = None;
+    let count = devices.len();
 
     for (index, device) in devices.iter().enumerate() {
         let row = build_device_row(device, &ctx.display_name(device), ctx);
+
+        if let Some(action_row) = row.downcast_ref::<adw::ActionRow>() {
+            let up_button = gtk::Button::builder()
+                .icon_name("go-up-symbolic")
+                .valign(gtk::Align::Center)
+                .css_classes(["flat", "sidebar-reorder-btn"])
+                .sensitive(index > 0)
+                .tooltip_text(ctx.t("sidebar.move_up"))
+                .build();
+            let down_button = gtk::Button::builder()
+                .icon_name("go-down-symbolic")
+                .valign(gtk::Align::Center)
+                .css_classes(["flat", "sidebar-reorder-btn"])
+                .sensitive(index + 1 < count)
+                .tooltip_text(ctx.t("sidebar.move_down"))
+                .build();
+
+            {
+                let ordered_devices = ordered_devices.clone();
+                let list = list.clone();
+                let selected_device_id = selected_device_id.clone();
+                let ctx = ctx.clone();
+                let suppress_nav_pop = suppress_nav_pop.clone();
+                up_button.connect_clicked(move |_| {
+                    ordered_devices.borrow_mut().swap(index, index - 1);
+                    let new_order = ordered_devices.borrow().iter().map(|d| d.device_id.clone()).collect();
+                    ctx.set_device_order(new_order);
+                    rebuild_sidebar(&list, &ordered_devices.borrow(), &selected_device_id, &ctx, &suppress_nav_pop);
+                });
+            }
+            {
+                let ordered_devices = ordered_devices.clone();
+                let list = list.clone();
+                let selected_device_id = selected_device_id.clone();
+                let ctx = ctx.clone();
+                let suppress_nav_pop = suppress_nav_pop.clone();
+                down_button.connect_clicked(move |_| {
+                    ordered_devices.borrow_mut().swap(index, index + 1);
+                    let new_order = ordered_devices.borrow().iter().map(|d| d.device_id.clone()).collect();
+                    ctx.set_device_order(new_order);
+                    rebuild_sidebar(&list, &ordered_devices.borrow(), &selected_device_id, &ctx, &suppress_nav_pop);
+                });
+            }
+
+            action_row.add_suffix(&up_button);
+            action_row.add_suffix(&down_button);
+
+            // Drag-and-drop reordering, as an alternative to ▲▼ — a small
+            // handle so the drag gesture doesn't fight the row's own click-
+            // to-select (dragging from anywhere on the row would eat the
+            // click meant to just open that device).
+            let handle = gtk::Image::from_icon_name("list-drag-handle-symbolic");
+            handle.set_css_classes(&["sidebar-drag-handle"]);
+            handle.set_valign(gtk::Align::Center);
+            action_row.add_prefix(&handle);
+
+            let drag_source = gtk::DragSource::new();
+            drag_source.set_actions(gtk::gdk::DragAction::MOVE);
+            {
+                let device_id = device.device_id.clone();
+                drag_source.connect_prepare(move |_, _, _| {
+                    Some(gtk::gdk::ContentProvider::for_value(&device_id.to_value()))
+                });
+            }
+            handle.add_controller(drag_source);
+
+            let drop_target = gtk::DropTarget::new(glib::types::Type::STRING, gtk::gdk::DragAction::MOVE);
+            {
+                let ordered_devices = ordered_devices.clone();
+                let list = list.clone();
+                let selected_device_id = selected_device_id.clone();
+                let ctx = ctx.clone();
+                let suppress_nav_pop = suppress_nav_pop.clone();
+                drop_target.connect_drop(move |_, value, _, _| {
+                    let Ok(dragged_id) = value.get::<String>() else { return false };
+                    let devices = ordered_devices.borrow();
+                    let Some(from) = devices.iter().position(|d| d.device_id == dragged_id) else {
+                        return false;
+                    };
+                    drop(devices);
+                    if from == index {
+                        return true;
+                    }
+                    let mut devices = ordered_devices.borrow_mut();
+                    let moved = devices.remove(from);
+                    devices.insert(index, moved);
+                    let new_order = devices.iter().map(|d| d.device_id.clone()).collect();
+                    drop(devices);
+                    ctx.set_device_order(new_order);
+                    rebuild_sidebar(&list, &ordered_devices.borrow(), &selected_device_id, &ctx, &suppress_nav_pop);
+                    true
+                });
+            }
+            action_row.add_controller(drop_target);
+        }
+
         list.append(&row);
 
         if Some(&device.device_id) == selected_device_id.as_ref() {
@@ -394,7 +539,16 @@ fn rebuild_sidebar(
         }
     }
 
-    let row_to_select = row_to_select.or_else(|| list.row_at_index(0));
+    // Nothing was already selected (first-ever population, or the
+    // previously-selected device disconnected) — prefer the explicit
+    // "Default device" from Preferences if it's actually present, otherwise
+    // fall back to whatever ended up first in the (now-stable) order above.
+    let row_to_select = row_to_select.or_else(|| {
+        let default_index = ctx
+            .default_device_id()
+            .and_then(|default_id| devices.iter().position(|d| d.device_id == default_id));
+        list.row_at_index(default_index.unwrap_or(0) as i32)
+    });
     if let Some(row) = row_to_select {
         // Bracket the signal this fires synchronously so the row-selected
         // handler can tell this apart from a genuine user click.
@@ -888,6 +1042,19 @@ fn load_app_css() {
             border-radius: 999px; \
             background-color: alpha(@success_color, 0.15); \
             font-size: 0.9em; \
+        } \
+        .sidebar-reorder-btn { \
+            min-width: 16px; \
+            min-height: 16px; \
+            padding: 2px; \
+        } \
+        .sidebar-reorder-btn image { \
+            -gtk-icon-size: 12px; \
+        } \
+        .sidebar-drag-handle { \
+            min-width: 16px; \
+            min-height: 16px; \
+            opacity: 0.5; \
         }",
     );
     if let Some(display) = gtk::gdk::Display::default() {

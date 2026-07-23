@@ -39,6 +39,17 @@ pub fn set_enabled(enabled: bool) {
     }
 
     let Ok(exe) = std::env::current_exe() else { return };
+    // `current_exe` reads `/proc/self/exe`, a symlink the kernel appends
+    // " (deleted)" to (as literal text baked into the path, not something
+    // `PathBuf` knows to strip) whenever the file it points at was
+    // replaced out from under the running process — e.g. this exact
+    // process was already running when `install.sh` overwrote the binary
+    // at the same path. Without stripping it, this wrote an `Exec=` line
+    // pointing at a nonexistent path with " (deleted)" literally in it, so
+    // the autostart entry silently failed to launch anything on next
+    // login despite `is_enabled()` correctly reporting the toggle as on.
+    let exe_str = exe.to_string_lossy();
+    let exe_str = exe_str.strip_suffix(" (deleted)").unwrap_or(&exe_str);
     let dir = autostart_dir();
     let _ = fs::create_dir_all(&dir);
 
@@ -47,10 +58,9 @@ pub fn set_enabled(enabled: bool) {
          Type=Application\n\
          Name=LianLiGTK\n\
          Icon=io.github.weversonl.LianLiGTK\n\
-         Exec={} --start-hidden\n\
+         Exec={exe_str} --start-hidden\n\
          X-GNOME-Autostart-enabled=true\n\
-         NoDisplay=false\n",
-        exe.display()
+         NoDisplay=false\n"
     );
     let _ = fs::write(path, contents);
 }

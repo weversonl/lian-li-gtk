@@ -42,12 +42,23 @@ async fn send_delay() {
 }
 
 /// Resends whatever `Ctx::last_effect` has recorded for `device_id`, if
-/// anything. Returns `true` if something was reapplied.
+/// anything. Returns `true` only if a send actually went through — it used
+/// to unconditionally return `true` for a recorded `Frames` effect even
+/// when every single send attempt failed, which silently left the device
+/// however the Identify blink itself ended (its last frame, typically
+/// dark) instead of ever really restoring anything. That's the most likely
+/// explanation for "Identify sometimes leaves the device off/stuck" after
+/// reopening the app: right after being closed for a while, a wireless
+/// device's RF link can be colder/less responsive than it is mid-session
+/// (same idle-watchdog behavior documented elsewhere in this app), so the
+/// first send failing was actually a fairly likely — not exceptional —
+/// case, not just a rebind-only edge case.
 ///
-/// Retries once per send on failure: right after a bind/rebind the daemon
-/// may report the device as bound (see `wait_for_bind_state` in
-/// `wireless_pairing`) slightly before the RF link is actually ready to take
-/// a frame/effect push, so the very first send here can still get dropped.
+/// Retries up to `MAX_ATTEMPTS` times per send, with a growing gap between
+/// each, since a cold link may need more than one extra nudge, not just
+/// one, before it reliably takes a command again.
+const MAX_ATTEMPTS: u32 = 3;
+
 pub async fn reapply_last_effect(ctx: &Rc<Ctx>, device_id: &str) -> bool {
     // Let the link settle a moment past the bind-state confirmation before
     // pushing anything — the confirmation itself is the earliest sign the
@@ -56,28 +67,47 @@ pub async fn reapply_last_effect(ctx: &Rc<Ctx>, device_id: &str) -> bool {
 
     match ctx.last_effect_for(device_id) {
         Some(LastEffect::Frames(frames, interval_ms, _mode)) => {
-            let request = IpcRequest::SetRgbFrames { device_id: device_id.to_string(), frames: frames.clone(), interval_ms };
-            if ctx.client.call_unit(request).await.is_err() {
-                send_delay().await;
-                let retry = IpcRequest::SetRgbFrames { device_id: device_id.to_string(), frames, interval_ms };
-                if ctx.client.call_unit(retry).await.is_err() {
-                    ctx.toast(ctx.t("identify.failed_reapply"));
+            let mut ok = false;
+            for attempt in 0..MAX_ATTEMPTS {
+                let request = IpcRequest::SetRgbFrames {
+                    device_id: device_id.to_string(),
+                    frames: frames.clone(),
+                    interval_ms,
+                };
+                if ctx.client.call_unit(request).await.is_ok() {
+                    ok = true;
+                    break;
                 }
+                glib::timeout_future(Duration::from_millis(IDENTIFY_SEND_DELAY_MS * (attempt as u64 + 1))).await;
             }
-            true
+            if !ok {
+                ctx.toast(ctx.t("identify.failed_reapply"));
+            }
+            ok
         }
         Some(LastEffect::Static(zone_effects)) => {
+            let mut all_ok = true;
             for (zone, effect) in zone_effects {
-                let request =
-                    IpcRequest::SetRgbEffect { device_id: device_id.to_string(), zone, effect: effect.clone() };
-                if ctx.client.call_unit(request).await.is_err() {
-                    send_delay().await;
-                    let retry = IpcRequest::SetRgbEffect { device_id: device_id.to_string(), zone, effect };
-                    let _ = ctx.client.call_unit(retry).await;
+                let mut zone_ok = false;
+                for attempt in 0..MAX_ATTEMPTS {
+                    let request = IpcRequest::SetRgbEffect {
+                        device_id: device_id.to_string(),
+                        zone,
+                        effect: effect.clone(),
+                    };
+                    if ctx.client.call_unit(request).await.is_ok() {
+                        zone_ok = true;
+                        break;
+                    }
+                    glib::timeout_future(Duration::from_millis(IDENTIFY_SEND_DELAY_MS * (attempt as u64 + 1))).await;
                 }
+                all_ok &= zone_ok;
                 send_delay().await;
             }
-            true
+            if !all_ok {
+                ctx.toast(ctx.t("identify.failed_reapply"));
+            }
+            all_ok
         }
         None => false,
     }
@@ -112,20 +142,20 @@ pub async fn identify(ctx: &Rc<Ctx>, device_id: &str) {
         return;
     }
 
-    let has_recorded_effect = ctx.last_effect_for(device_id).is_some();
-
-    // Only bother capturing a static snapshot if there's nothing recorded
-    // to reapply instead — capturing before blinking either way, since
-    // we're about to overwrite the device regardless.
+    // Captured unconditionally now, even when there's a recorded effect to
+    // reapply instead — `reapply_last_effect` retries hard, but a wireless
+    // link that's genuinely gone cold can still fail every attempt, and
+    // this is the only fallback for that case. Skipping the capture
+    // whenever a recorded effect existed used to mean a total reapply
+    // failure left the device wherever the Identify blink itself ended
+    // (its last frame, typically dark) with nothing left to fall back to.
     let mut captured: Vec<(u8, Vec<[u8; 3]>)> = Vec::new();
-    if !has_recorded_effect {
-        for zone in 0..zone_count as u8 {
-            let request = IpcRequest::GetZoneColors { device_id: device_id.to_string(), zone };
-            if let Ok(colors) = ctx.client.call::<Vec<[u8; 3]>>(request).await {
-                captured.push((zone, colors));
-            }
-            send_delay().await;
+    for zone in 0..zone_count as u8 {
+        let request = IpcRequest::GetZoneColors { device_id: device_id.to_string(), zone };
+        if let Ok(colors) = ctx.client.call::<Vec<[u8; 3]>>(request).await {
+            captured.push((zone, colors));
         }
+        send_delay().await;
     }
 
     let frames = identify_frames(led_count);

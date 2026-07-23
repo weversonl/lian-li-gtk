@@ -11,6 +11,7 @@ mod effects;
 mod i18n;
 mod identify;
 mod ipc_client;
+mod last_effect;
 mod pages;
 mod rgb_persist;
 mod tray;
@@ -38,5 +39,16 @@ pub fn restart() -> ! {
 fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(window::build_ui);
-    app.run()
+    // Not `app.run()` — that forwards the full `argv` (including our own
+    // `--start-hidden`, read separately via `std::env::args()` in
+    // `window::build_ui`) to `GApplication`'s own option parser, which
+    // rejects anything it doesn't recognize as a registered `GOption` and
+    // exits immediately with "Unknown option --start-hidden" — exactly
+    // the flag the autostart `.desktop` entry passes on every login (see
+    // `autostart.rs`), so the app silently failed to start with the
+    // system every single time despite the entry itself being completely
+    // correct. Passing only `argv[0]` sidesteps `GApplication`'s parsing
+    // entirely while leaving our own `std::env::args()` check unaffected.
+    let argv0: Vec<String> = std::env::args().take(1).collect();
+    app.run_with_args(&argv0)
 }

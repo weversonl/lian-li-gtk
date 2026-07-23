@@ -27,7 +27,7 @@ impl Default for Lang {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppPrefs {
     #[serde(default = "default_true")]
     pub global_direction_enabled: bool,
@@ -53,6 +53,11 @@ pub struct AppPrefs {
     /// silently forgot it and showed Rainbow selected instead).
     #[serde(default = "default_global_effect_mode")]
     pub global_effect_mode: RgbMode,
+    /// Which device's detail should be auto-selected on startup (Dashboard
+    /// sidebar) — see `Ctx::default_device_id`. `None` means "whatever
+    /// device ends up first in `device_order`", not "no selection".
+    #[serde(default)]
+    pub default_device_id: Option<String>,
 }
 
 fn default_global_effect_mode() -> RgbMode {
@@ -84,6 +89,7 @@ impl Default for AppPrefs {
             lang: Lang::default(),
             gradient_colors: default_gradient_colors(),
             global_effect_mode: default_global_effect_mode(),
+            default_device_id: None,
         }
     }
 }

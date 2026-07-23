@@ -100,6 +100,40 @@ fn general_page(ctx: &Rc<Ctx>) -> adw::PreferencesPage {
     background_group.add(&autostart_row);
     page.add(&background_group);
 
+    // "First in order" here refers to whatever ends up first after
+    // `Ctx::sort_by_saved_order` (the same ▲▼ reordering the sidebar itself
+    // now supports) — not the daemon's own (unstable) device listing order.
+    let startup_group = adw::PreferencesGroup::builder().title(ctx.t("prefs.startup")).build();
+    let default_device_row = adw::ComboRow::builder()
+        .title(ctx.t("prefs.default_device"))
+        .subtitle(ctx.t("prefs.default_device_subtitle"))
+        .build();
+    let devices = ctx.sort_by_saved_order(ctx.state.borrow().devices.clone());
+    let mut option_labels: Vec<String> = vec![ctx.t("prefs.default_device_first_in_order").to_string()];
+    option_labels.extend(devices.iter().map(|d| ctx.display_name(d)));
+    let option_labels_ref: Vec<&str> = option_labels.iter().map(String::as_str).collect();
+    let model = gtk::StringList::new(&option_labels_ref);
+    default_device_row.set_model(Some(&model));
+    let saved_default = ctx.default_device_id();
+    let initial_index = saved_default
+        .as_ref()
+        .and_then(|id| devices.iter().position(|d| &d.device_id == id))
+        .map(|i| i as u32 + 1)
+        .unwrap_or(0);
+    default_device_row.set_selected(initial_index);
+    {
+        let ctx = ctx.clone();
+        let device_ids: Vec<String> = devices.iter().map(|d| d.device_id.clone()).collect();
+        default_device_row.connect_selected_notify(move |row| {
+            let selected = row.selected();
+            let new_default =
+                if selected == 0 { None } else { device_ids.get(selected as usize - 1).cloned() };
+            ctx.set_default_device_id(new_default);
+        });
+    }
+    startup_group.add(&default_device_row);
+    page.add(&startup_group);
+
     let ctx = ctx.clone();
     glib::spawn_future_local(async move {
         match ctx.client.call::<serde_json::Value>(IpcRequest::Ping).await {

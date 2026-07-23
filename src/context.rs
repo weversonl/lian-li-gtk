@@ -35,7 +35,7 @@ pub struct RgbEditorSnapshot {
 /// it from scratch. `Static` keeps one `(zone, effect)` pair per zone that
 /// was actually set, since Global Effects applies the same effect to every
 /// zone on a device while the RGB Editor targets just one.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum LastEffect {
     /// Frame buffer + interval, plus the `RgbMode` they were rendered from
     /// (Rainbow/Rainbow Morph/Breathing) — the frames alone don't say which
@@ -72,14 +72,18 @@ pub struct Ctx {
     pub device_order: Rc<RefCell<Vec<String>>>,
     /// Small page-level UI toggles — see `crate::app_prefs`.
     pub app_prefs: Rc<RefCell<AppPrefs>>,
-    /// In-memory (not persisted — this is runtime state, not a preference)
-    /// record of the last effect successfully applied to each wireless
-    /// device, from *any* page (RGB Editor or Global Effects). Two things
-    /// read this: "Identify" resumes it after blinking instead of freezing
-    /// a static snapshot (`GetZoneColors`/`SetRgbDirect` can only capture
-    /// one still frame, not an animation), and Bind reapplies it after a
-    /// rebind — the device doesn't remember its own effect across an
-    /// unbind/bind cycle, so without this it just comes back dark/idle.
+    /// Disk-persisted (see `crate::last_effect`) record of the last effect
+    /// successfully applied to each wireless device, from *any* page (RGB
+    /// Editor or Global Effects). Two things read this: "Identify" resumes
+    /// it after blinking instead of freezing a static snapshot
+    /// (`GetZoneColors`/`SetRgbDirect` can only capture one still frame,
+    /// not an animation), and Bind reapplies it after a rebind — the device
+    /// doesn't remember its own effect across an unbind/bind cycle, so
+    /// without this it just comes back dark/idle. Used to be in-memory
+    /// only, which meant restarting the app between applying an animation
+    /// and hitting Identify silently lost it — Identify then had nothing to
+    /// resume and fell back to capturing/restoring a single still frame,
+    /// which for a mid-animation device could easily be read back as "off".
     pub last_effect: Rc<RefCell<HashMap<String, LastEffect>>>,
     /// Disk-persisted cache of the RGB Editor's last-used controls per
     /// device — see `RgbEditorSnapshot`.
@@ -212,6 +216,17 @@ impl Ctx {
         crate::app_prefs::save(&prefs);
     }
 
+    /// See `AppPrefs::default_device_id`'s doc comment.
+    pub fn default_device_id(&self) -> Option<String> {
+        self.app_prefs.borrow().default_device_id.clone()
+    }
+
+    pub fn set_default_device_id(&self, device_id: Option<String>) {
+        let mut prefs = self.app_prefs.borrow_mut();
+        prefs.default_device_id = device_id;
+        crate::app_prefs::save(&prefs);
+    }
+
     pub fn fan_curve_graph_view(&self) -> bool {
         self.app_prefs.borrow().fan_curve_graph_view
     }
@@ -242,14 +257,18 @@ impl Ctx {
     }
 
     pub fn record_frames(&self, device_id: &str, frames: Vec<Vec<[u8; 3]>>, interval_ms: u16, mode: RgbMode) {
-        self.last_effect.borrow_mut().insert(device_id.to_string(), LastEffect::Frames(frames, interval_ms, mode));
+        let mut map = self.last_effect.borrow_mut();
+        map.insert(device_id.to_string(), LastEffect::Frames(frames, interval_ms, mode));
+        crate::last_effect::save(&map);
     }
 
     /// Replaces (not merges) the recorded static effect for a device — call
     /// once with every `(zone, effect)` pair that was actually sent for
     /// this device in one "apply" action, not per-zone.
     pub fn record_static_effect(&self, device_id: &str, zone_effects: Vec<(u8, RgbEffect)>) {
-        self.last_effect.borrow_mut().insert(device_id.to_string(), LastEffect::Static(zone_effects));
+        let mut map = self.last_effect.borrow_mut();
+        map.insert(device_id.to_string(), LastEffect::Static(zone_effects));
+        crate::last_effect::save(&map);
     }
 
     pub fn last_effect_for(&self, device_id: &str) -> Option<LastEffect> {
@@ -279,6 +298,7 @@ impl Ctx {
         let mut map = self.last_effect.borrow_mut();
         if let Some(effect) = map.remove(old_device_id) {
             map.insert(new_device_id.to_string(), effect);
+            crate::last_effect::save(&map);
         }
     }
 }
