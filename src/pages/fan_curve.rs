@@ -4,7 +4,6 @@
 
 use crate::app_prefs::Lang;
 use crate::context::Ctx;
-use crate::widgets::segmented_control;
 use adw::prelude::*;
 use gtk::glib;
 use lianli_shared::config::AppConfig;
@@ -163,12 +162,11 @@ fn build_editor(
     let source_widgets = SourceWidgets { row: source_row.clone(), command_row: command_row.clone(), command_help };
 
     let profile_group = adw::PreferencesGroup::new();
-    let profile_row = adw::ActionRow::builder().title(ctx.t("fc.curve_profile")).build();
-    profile_group.add(&profile_row);
     content.append(&profile_group);
 
     let view_group = adw::PreferencesGroup::new();
-    let view_row = adw::ActionRow::builder().title(ctx.t("fc.view")).build();
+    let view_names = gtk::StringList::new(&[ctx.t("fc.view_list"), ctx.t("fc.view_graph")]);
+    let view_row = adw::ComboRow::builder().title(ctx.t("fc.view")).model(&view_names).build();
     view_group.add(&view_row);
     content.append(&view_group);
 
@@ -190,15 +188,15 @@ fn build_editor(
     graph_area.set_visible(starts_in_graph);
     graph_reset_button.set_visible(starts_in_graph);
 
+    view_row.set_selected(if starts_in_graph { 1 } else { 0 });
     {
-        let view_names = [ctx.t("fc.view_list"), ctx.t("fc.view_graph")];
         let points_group = points_group.clone();
         let add_point_button = add_point_button.clone();
         let graph_area = graph_area.clone();
         let graph_reset_button = graph_reset_button.clone();
         let ctx = ctx.clone();
-        view_row.add_suffix(&segmented_control::build(&view_names, starts_in_graph as usize, move |i| {
-            let is_graph = i == 1;
+        view_row.connect_selected_notify(move |row| {
+            let is_graph = row.selected() == 1;
             points_group.set_visible(!is_graph);
             add_point_button.set_visible(!is_graph);
             graph_area.set_visible(is_graph);
@@ -207,7 +205,7 @@ fn build_editor(
             if is_graph {
                 graph_area.queue_draw();
             }
-        }));
+        });
     }
 
     {
@@ -227,8 +225,8 @@ fn build_editor(
     // Rebuilt fresh on every curve switch by `populate_profile_row`, since
     // reselecting a segmented_control button without retriggering
     // `on_change` isn't possible. Tracked so a rebuild can remove the old one.
-    let profile_widget: Rc<RefCell<Option<gtk::Box>>> = Rc::new(RefCell::new(None));
-    populate_profile_row(&profile_row, &profile_widget, &config, &selected_curve, &points_list, &graph_area, lang);
+    let profile_widget: Rc<RefCell<Option<adw::ComboRow>>> = Rc::new(RefCell::new(None));
+    populate_profile_row(&profile_group, &profile_widget, &config, &selected_curve, &points_list, &graph_area, lang);
 
     clamp.set_child(Some(&content));
     scrolled.set_child(Some(&clamp));
@@ -284,10 +282,10 @@ fn build_editor(
         });
     }
 
-    refresh_curve_list(&curves_list, &config, &selected_curve, &points_list, &source_widgets, &sensors, &source_handler_id, &graph_area, &profile_row, &profile_widget, lang);
+    refresh_curve_list(&curves_list, &config, &selected_curve, &points_list, &source_widgets, &sensors, &source_handler_id, &graph_area, &profile_group, &profile_widget, lang);
     refresh_points(&points_list, &config, &selected_curve, &graph_area, lang);
     populate_source_row(&source_widgets, &sensors, &config, &selected_curve, &source_handler_id, lang);
-    populate_profile_row(&profile_row, &profile_widget, &config, &selected_curve, &points_list, &graph_area, lang);
+    populate_profile_row(&profile_group, &profile_widget, &config, &selected_curve, &points_list, &graph_area, lang);
 
     {
         let config = config.clone();
@@ -296,7 +294,7 @@ fn build_editor(
         let sensors = sensors.clone();
         let source_handler_id = source_handler_id.clone();
         let graph_area = graph_area.clone();
-        let profile_row = profile_row.clone();
+        let profile_group = profile_group.clone();
         let profile_widget = profile_widget.clone();
         new_button.connect_clicked({
             let curves_list = curves_list.clone();
@@ -312,10 +310,10 @@ fn build_editor(
                 });
                 drop(cfg);
                 *selected_curve.borrow_mut() = Some(index);
-                refresh_curve_list(&curves_list, &config, &selected_curve, &points_list, &source_widgets, &sensors, &source_handler_id, &graph_area, &profile_row, &profile_widget, lang);
+                refresh_curve_list(&curves_list, &config, &selected_curve, &points_list, &source_widgets, &sensors, &source_handler_id, &graph_area, &profile_group, &profile_widget, lang);
                 refresh_points(&points_list, &config, &selected_curve, &graph_area, lang);
                 populate_source_row(&source_widgets, &sensors, &config, &selected_curve, &source_handler_id, lang);
-                populate_profile_row(&profile_row, &profile_widget, &config, &selected_curve, &points_list, &graph_area, lang);
+                populate_profile_row(&profile_group, &profile_widget, &config, &selected_curve, &points_list, &graph_area, lang);
             }
         });
     }
@@ -329,7 +327,7 @@ fn build_editor(
         let sensors = sensors.clone();
         let source_handler_id = source_handler_id.clone();
         let graph_area = graph_area.clone();
-        let profile_row = profile_row.clone();
+        let profile_group = profile_group.clone();
         let profile_widget = profile_widget.clone();
         let ctx = ctx.clone();
         delete_curve_button.connect_clicked(move |_| {
@@ -346,10 +344,10 @@ fn build_editor(
             } else {
                 Some(idx.min(remaining - 1))
             };
-            refresh_curve_list(&curves_list, &config, &selected_curve, &points_list, &source_widgets, &sensors, &source_handler_id, &graph_area, &profile_row, &profile_widget, lang);
+            refresh_curve_list(&curves_list, &config, &selected_curve, &points_list, &source_widgets, &sensors, &source_handler_id, &graph_area, &profile_group, &profile_widget, lang);
             refresh_points(&points_list, &config, &selected_curve, &graph_area, lang);
             populate_source_row(&source_widgets, &sensors, &config, &selected_curve, &source_handler_id, lang);
-            populate_profile_row(&profile_row, &profile_widget, &config, &selected_curve, &points_list, &graph_area, lang);
+            populate_profile_row(&profile_group, &profile_widget, &config, &selected_curve, &points_list, &graph_area, lang);
             ctx.toast(ctx.t("fc.curve_removed"));
         });
     }
@@ -389,8 +387,8 @@ fn refresh_curve_list(
     sensors: &Rc<Vec<SensorInfo>>,
     source_handler_id: &Rc<RefCell<Option<glib::SignalHandlerId>>>,
     graph_area: &gtk::DrawingArea,
-    profile_row: &adw::ActionRow,
-    profile_widget: &Rc<RefCell<Option<gtk::Box>>>,
+    profile_group: &adw::PreferencesGroup,
+    profile_widget: &Rc<RefCell<Option<adw::ComboRow>>>,
     lang: Lang,
 ) {
     while let Some(child) = list_box.first_child() {
@@ -420,7 +418,7 @@ fn refresh_curve_list(
         let sensors_cb = sensors.clone();
         let source_handler_id_cb = source_handler_id.clone();
         let graph_area_cb = graph_area.clone();
-        let profile_row_cb = profile_row.clone();
+        let profile_row_cb = profile_group.clone();
         let profile_widget_cb = profile_widget.clone();
         row.connect_activated(move |_| {
             *selected_curve_cb.borrow_mut() = Some(i);
@@ -448,8 +446,8 @@ fn refresh_curve_list(
 /// Rebuilds the "Curve Profile" control, detecting which preset (if any)
 /// the current curve's points exactly match.
 fn populate_profile_row(
-    profile_row: &adw::ActionRow,
-    profile_widget: &Rc<RefCell<Option<gtk::Box>>>,
+    profile_group: &adw::PreferencesGroup,
+    profile_widget: &Rc<RefCell<Option<adw::ComboRow>>>,
     config: &Rc<RefCell<AppConfig>>,
     selected_curve: &Rc<RefCell<Option<usize>>>,
     points_list: &gtk::Box,
@@ -457,7 +455,7 @@ fn populate_profile_row(
     lang: Lang,
 ) {
     if let Some(old) = profile_widget.borrow_mut().take() {
-        profile_row.remove(&old);
+        profile_group.remove(&old);
     }
 
     let selected_index = selected_curve
@@ -486,8 +484,14 @@ fn populate_profile_row(
         crate::i18n::t(lang, "fc.profile_balanced"),
         crate::i18n::t(lang, "fc.profile_performance"),
     ];
-    let widget = segmented_control::build(&profile_names, selected_index, move |i| {
-        let preset = match i {
+    let profile_model = gtk::StringList::new(&profile_names);
+    let widget = adw::ComboRow::builder()
+        .title(crate::i18n::t(lang, "fc.curve_profile"))
+        .model(&profile_model)
+        .build();
+    widget.set_selected(selected_index as u32);
+    widget.connect_selected_notify(move |row| {
+        let preset = match row.selected() {
             1 => Some(PRESET_SILENT),
             2 => Some(PRESET_BALANCED),
             3 => Some(PRESET_PERFORMANCE),
@@ -500,7 +504,7 @@ fn populate_profile_row(
         }
         refresh_points(&points_list, &config, &selected_curve, &graph_area, lang);
     });
-    profile_row.add_suffix(&widget);
+    profile_group.add(&widget);
     *profile_widget.borrow_mut() = Some(widget);
 }
 

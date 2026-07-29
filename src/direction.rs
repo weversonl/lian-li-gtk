@@ -30,6 +30,12 @@ pub fn is_reverse(d: RgbDirection) -> bool {
     matches!(d, RgbDirection::CounterClockwise | RgbDirection::Down | RgbDirection::Gather)
 }
 
+/// `is_reverse` with a per-device correction on top — see
+/// `DeviceRgbPrefs::invert_direction`.
+pub fn effective_reverse(d: RgbDirection, invert: bool) -> bool {
+    is_reverse(d) ^ invert
+}
+
 pub const WAVE_DIRECTIONS: [RgbDirection; 4] = [
     RgbDirection::Up,
     RgbDirection::Down,

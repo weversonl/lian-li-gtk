@@ -18,39 +18,36 @@ pub struct AppState {
     pub devices: Vec<DeviceInfo>,
     pub telemetry: TelemetrySnapshot,
     pub presets: Vec<RgbPreset>,
-    /// Unused — reserved for detecting newly-connected devices.
-    #[allow(dead_code)]
-    known_device_ids: HashSet<String>,
 }
 
 pub type SharedState = Rc<RefCell<AppState>>;
-
-#[allow(dead_code)]
-pub fn diff_new_devices(state: &SharedState, previous: &HashSet<String>) -> Vec<String> {
-    state
-        .borrow()
-        .devices
-        .iter()
-        .map(|d| d.device_id.clone())
-        .filter(|id| !previous.contains(id))
-        .collect()
-}
 
 pub fn new_shared_state() -> SharedState {
     Rc::new(RefCell::new(AppState::default()))
 }
 
 /// Polls device list + telemetry every second; `on_update` fires after each
-/// successful poll. Call once at startup.
+/// successful poll. `on_reconnect` fires once per device_id that reappears
+/// in `ListDevices` after having been missing from a previous poll (e.g. a
+/// wireless device's RF link dropped and came back) — including on the
+/// very first poll at startup, since a device present there could equally
+/// be one that just regained power after a full PC reboot (its RGB reset
+/// to nothing) or one that never lost power at all (already showing the
+/// right thing, so reapplying is a harmless no-op). There's no way to tell
+/// those two cases apart from here, and only the first one needs the
+/// reapply, so it always fires. Call once at startup.
 pub fn start_polling(
     client: IpcClient,
     state: SharedState,
     on_update: impl Fn() + 'static,
+    on_reconnect: impl Fn(String) + 'static,
 ) {
     glib::spawn_future_local(async move {
         if let Ok(presets) = client.call::<Vec<RgbPreset>>(IpcRequest::ListRgbPresets).await {
             state.borrow_mut().presets = presets;
         }
+
+        let mut known_device_ids: HashSet<String> = HashSet::new();
 
         loop {
             let devices = client.call::<Vec<DeviceInfo>>(IpcRequest::ListDevices).await;
@@ -58,6 +55,11 @@ pub fn start_polling(
 
             let mut changed = false;
             if let Ok(devices) = devices {
+                let current_ids: HashSet<String> = devices.iter().map(|d| d.device_id.clone()).collect();
+                for id in current_ids.difference(&known_device_ids) {
+                    on_reconnect(id.clone());
+                }
+                known_device_ids = current_ids;
                 state.borrow_mut().devices = devices;
                 changed = true;
             }

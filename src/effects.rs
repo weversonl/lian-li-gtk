@@ -21,6 +21,23 @@ pub fn mode_uses_color(mode: lianli_shared::rgb::RgbMode) -> bool {
     !matches!(mode, lianli_shared::rgb::RgbMode::Rainbow | lianli_shared::rgb::RgbMode::RainbowMorph)
 }
 
+/// How many of the 8 color swatches are actually meaningful for `mode`.
+/// Every other color-using mode (Static, Breathing, Direct, ...) only ever
+/// reads `colors[0]` — showing all 8 swatches for those wasn't just visual
+/// clutter, it was misleading, since picking swatches 2-8 silently did
+/// nothing. `ColorCycle` (Gradient Wave) uses all 8; `Meteor` uses 2 (head,
+/// tail); `MeteorShower` (repurposed as a rainbow-headed meteor for wireless
+/// devices — see `apply_edge_frame`'s callers) only needs the tail color,
+/// since the head cycles the hue wheel on its own.
+pub fn color_count_for_mode(mode: lianli_shared::rgb::RgbMode) -> usize {
+    use lianli_shared::rgb::RgbMode;
+    match mode {
+        RgbMode::ColorCycle => 8,
+        RgbMode::Meteor | RgbMode::Runway => 2,
+        _ => 1,
+    }
+}
+
 /// Wireless `Static`/`Direct` pushes ignore `RgbEffect.brightness` on the
 /// daemon side, so brightness has to be baked into the color here instead.
 pub fn scale_color(color: [u8; 3], factor: f64) -> [u8; 3] {
@@ -47,6 +64,17 @@ pub fn fps_to_interval_ms(fps: f64) -> u16 {
 pub fn frame_count_for(fps: f64, cycle_ms: f64) -> usize {
     let interval_ms = fps_to_interval_ms(fps) as f64;
     ((cycle_ms / interval_ms).round() as usize).clamp(4, 200)
+}
+
+/// How many tail-only frames a Meteor effect should hold once it reaches
+/// the far tip, at `interval_ms` per frame, before looping — L-Connect
+/// pauses a few seconds dark between laps instead of restarting instantly.
+/// `pause_secs <= 0` means no pause at all (an instant restart).
+pub fn meteor_pause_frames(interval_ms: u16, pause_secs: f64) -> usize {
+    if pause_secs <= 0.0 {
+        return 0;
+    }
+    ((pause_secs * 1000.0 / interval_ms.max(1) as f64).round() as usize).max(1)
 }
 
 pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
@@ -143,6 +171,167 @@ pub fn custom_gradient_wave_frames(
         .collect()
 }
 
+/// A bright "head" sweeping once across the strip, dragging a fading trail
+/// behind it and leaving everything else off (or `tail_color`, if not
+/// black) — the classic ARGB "Meteor" effect. `circular` picks the strip's
+/// topology: `false` (a cable with two distinct physical ends) is a one-way
+/// linear sweep — the head starts at one tip, travels to the other, and
+/// only *then* snaps back to the start for the next lap, since blending the
+/// trail across the seam of a strip with real ends (as an earlier version
+/// of this function did for every strip) made the tail flicker at the
+/// wrong end every lap. `true` (a closed ring, e.g. the LEDs around a fan's
+/// hub) wraps the trail seamlessly from the last LED back to the first,
+/// since there they really are physically adjacent. `rainbow_head` cycles
+/// the head's hue over the lap instead of using `head_color` (used to
+/// repurpose `RgbMode::MeteorShower` as a rainbow-headed variant for
+/// wireless devices, same trick as `ColorCycle` → "Gradient Wave").
+///
+/// Every physical strip (see `strip_bounds`) plays the identical sweep in
+/// sync, all moving together — this is what actually reads as "one pulse
+/// traveling the cable" for a cable made of several physical strips stacked
+/// end to end: each strip's own point lights up at the same relative
+/// height at the same instant, so the whole set moves as one wave. `strip_count`
+/// must match the device's real physical strip count — setting it to the
+/// wrong number (e.g. 2 on an 8-strip cable) makes only that many
+/// simultaneous points appear instead of matching the real segmentation.
+/// Not a relay where only one strip animates while the rest sit dark (see
+/// `meteor_chase_frames`, "Meteor (Split)").
+///
+/// `pause_frames` appends that many tail-only frames after the sweep
+/// completes, before the sequence loops — L-Connect holds ~5s dark between
+/// laps instead of restarting instantly.
+///
+/// For a linear strip, the head only travels to `t = 1.0` (the far tip),
+/// but the trail behind it is still lit at that point — cutting straight to
+/// `pause_frames` there would chop the fading tail off abruptly instead of
+/// letting it finish fading out. `exit_frames` extra frames let `t` keep
+/// going past 1.0 (or below 0.0 in reverse) at the same speed, so the tail
+/// runs off the far tip and fully fades to `tail_color` before the pause,
+/// instead of ending mid-fade. A closed ring has no such tip to run off of
+/// — by the time the head completes the lap, the trail behind it has
+/// already faded out naturally, so no extra frames are needed there.
+#[allow(clippy::too_many_arguments)]
+pub fn meteor_frames(
+    led_count: usize,
+    frame_count: usize,
+    pause_frames: usize,
+    head_color: [u8; 3],
+    tail_color: [u8; 3],
+    rainbow_head: bool,
+    reverse: bool,
+    strip_count: usize,
+    circular: bool,
+    brightness: f32,
+) -> Vec<Vec<[u8; 3]>> {
+    const TAIL_LEN: f32 = 0.35;
+    let bounds = strip_bounds(led_count, strip_count);
+    let tail = scale_color(tail_color, brightness as f64);
+    let exit_frames = if circular { 0 } else { (frame_count as f32 * TAIL_LEN).round() as usize };
+    let mut frames: Vec<Vec<[u8; 3]>> = (0..frame_count + exit_frames)
+        .map(|frame| {
+            let t = frame as f32 / frame_count.max(1) as f32;
+            let head_pos = if reverse { 1.0 - t } else { t };
+            let head = if rainbow_head {
+                hsv_to_rgb(t.min(1.0), 1.0, brightness)
+            } else {
+                scale_color(head_color, brightness as f64)
+            };
+            (0..led_count)
+                .map(|led| {
+                    let pos = strip_position(&bounds, led);
+                    let distance = if circular {
+                        // Wraps from the last LED back to the first — correct
+                        // for a closed ring, where they're physically adjacent.
+                        if reverse { wrap01(pos - head_pos) } else { wrap01(head_pos - pos) }
+                    } else {
+                        // Positive only on the side the head has already swept
+                        // past — never wraps to the other tip of the strip.
+                        if reverse { pos - head_pos } else { head_pos - pos }
+                    };
+                    if (0.0..TAIL_LEN).contains(&distance) {
+                        lerp_color(tail, head, 1.0 - distance / TAIL_LEN)
+                    } else {
+                        tail
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    frames.extend((0..pause_frames).map(|_| vec![tail; led_count]));
+    frames
+}
+
+/// The strip-by-strip Meteor relay: each physical strip (see `strip_bounds`)
+/// takes its turn sweeping a full lap, one at a time, in sequence — a
+/// purple thread passing through one LED strip, then another, then another,
+/// until the last, then restarting from the first — not every strip
+/// sweeping together merged as one like `meteor_frames`. Once the last
+/// strip finishes, `pause_frames` tail-only frames hold before the relay
+/// loops back to the first strip.
+///
+/// Same tail-exit handling as `meteor_frames` — each strip's own turn gets
+/// extra frames past `t = 1.0` so its trail fades out fully before handing
+/// off to the next strip, instead of cutting the fade off abruptly. `circular`
+/// has the same meaning as in `meteor_frames` (a closed ring vs. a strip
+/// with two real ends), applied to each strip's own turn.
+///
+/// `reverse` only flips the sweep direction *within* each strip's turn —
+/// the relay always visits strips in the same buffer order regardless, so
+/// which physical strip goes first stays fixed while just the motion
+/// inside each turn flips (a wiring-order fix shouldn't also reorder which
+/// strip the relay starts from).
+#[allow(clippy::too_many_arguments)]
+pub fn meteor_chase_frames(
+    led_count: usize,
+    frame_count_per_strip: usize,
+    pause_frames: usize,
+    head_color: [u8; 3],
+    tail_color: [u8; 3],
+    rainbow_head: bool,
+    reverse: bool,
+    strip_count: usize,
+    circular: bool,
+    brightness: f32,
+) -> Vec<Vec<[u8; 3]>> {
+    const TAIL_LEN: f32 = 0.35;
+    let bounds = strip_bounds(led_count, strip_count);
+    let tail = scale_color(tail_color, brightness as f64);
+    let n_strips = bounds.len().saturating_sub(1).max(1);
+    let exit_frames = if circular { 0 } else { (frame_count_per_strip as f32 * TAIL_LEN).round() as usize };
+    let mut frames: Vec<Vec<[u8; 3]>> =
+        Vec::with_capacity(n_strips * (frame_count_per_strip + exit_frames) + pause_frames);
+    for w in bounds.windows(2) {
+        let (start, end) = (w[0], w[1]);
+        let strip_len = (end - start).max(1);
+        for frame in 0..frame_count_per_strip + exit_frames {
+            let t = frame as f32 / frame_count_per_strip.max(1) as f32;
+            let head_pos = if reverse { 1.0 - t } else { t };
+            let head = if rainbow_head {
+                hsv_to_rgb(t.min(1.0), 1.0, brightness)
+            } else {
+                scale_color(head_color, brightness as f64)
+            };
+            let mut led_frame = vec![tail; led_count];
+            for local in 0..strip_len {
+                let pos = local as f32 / strip_len as f32;
+                let distance = if circular {
+                    if reverse { wrap01(pos - head_pos) } else { wrap01(head_pos - pos) }
+                } else if reverse {
+                    pos - head_pos
+                } else {
+                    head_pos - pos
+                };
+                if (0.0..TAIL_LEN).contains(&distance) {
+                    led_frame[start + local] = lerp_color(tail, head, 1.0 - distance / TAIL_LEN);
+                }
+            }
+            frames.push(led_frame);
+        }
+    }
+    frames.extend((0..pause_frames).map(|_| vec![tail; led_count]));
+    frames
+}
+
 /// `(start, end)` LED-index ranges for `strip_count` physical strips
 /// concatenated in one flat buffer, distributed as evenly as possible.
 fn strip_bounds(led_count: usize, strip_count: usize) -> Vec<usize> {
@@ -228,6 +417,87 @@ pub fn rainbow_wave_frames(
     per_device
 }
 
+/// The L-Connect-style Meteor relay carried across *devices* instead of
+/// physical strips within one device (see `meteor_chase_frames` for the
+/// within-device version): each device takes its full turn, in the order
+/// given, before handing off to the next — fans first, then the GPU
+/// Strimer, then the motherboard Strimer, then back to the fans, matching
+/// whatever device order the user set on this page. Once every device has
+/// had a turn, `pause_frames` holds everything dark before the relay loops
+/// back to the first device.
+///
+/// All returned sequences share the same total length so every device can
+/// be sent with the same `interval_ms` and stay in step — while it's not
+/// this device's turn, its sequence is just solid `tail_color`.
+/// `device_reversed`/`device_strip_counts`/`device_circular` are each
+/// device's own settings (from `DeviceRgbPrefs`), applied only to that
+/// device's own turn — they don't affect which device goes first.
+#[allow(clippy::too_many_arguments)]
+pub fn meteor_relay_across_devices(
+    device_led_counts: &[usize],
+    frame_count_per_device: usize,
+    pause_frames: usize,
+    head_color: [u8; 3],
+    tail_color: [u8; 3],
+    rainbow_head: bool,
+    device_reversed: &[bool],
+    device_strip_counts: &[usize],
+    device_circular: &[bool],
+    brightness: f32,
+) -> Vec<Vec<Vec<[u8; 3]>>> {
+    let n = device_led_counts.len();
+    let tail = scale_color(tail_color, brightness as f64);
+
+    let own_turns: Vec<Vec<Vec<[u8; 3]>>> = (0..n)
+        .map(|i| {
+            meteor_frames(
+                device_led_counts[i],
+                frame_count_per_device,
+                0,
+                head_color,
+                tail_color,
+                rainbow_head,
+                device_reversed.get(i).copied().unwrap_or(false),
+                device_strip_counts.get(i).copied().unwrap_or(1),
+                device_circular.get(i).copied().unwrap_or(false),
+                brightness,
+            )
+        })
+        .collect();
+
+    stagger_across_devices(&own_turns, device_led_counts, pause_frames, tail)
+}
+
+/// Interleaves an already-rendered "own turn" frame sequence per device
+/// into a device-relay timeline, generalizing `meteor_relay_across_devices`
+/// to any effect: each device's sequence is padded with `off_color` frames
+/// everywhere except its own turn window, so every device can be sent with
+/// the same `interval_ms` and stay in step, one device lighting up at a
+/// time in the given order, looping back to the first once every device
+/// has had a turn (with `pause_frames` of `off_color` held in between).
+pub fn stagger_across_devices(
+    own_turns: &[Vec<Vec<[u8; 3]>>],
+    device_led_counts: &[usize],
+    pause_frames: usize,
+    off_color: [u8; 3],
+) -> Vec<Vec<Vec<[u8; 3]>>> {
+    (0..own_turns.len())
+        .map(|i| {
+            let led_count = device_led_counts.get(i).copied().unwrap_or(0);
+            let mut seq: Vec<Vec<[u8; 3]>> = Vec::new();
+            for (j, turn) in own_turns.iter().enumerate() {
+                if j == i {
+                    seq.extend(turn.iter().cloned());
+                } else {
+                    seq.extend((0..turn.len()).map(|_| vec![off_color; led_count]));
+                }
+            }
+            seq.extend((0..pause_frames).map(|_| vec![off_color; led_count]));
+            seq
+        })
+        .collect()
+}
+
 /// Wraps a float into `[0, 1)`, staying positive for negative inputs.
 fn wrap01(x: f32) -> f32 {
     ((x % 1.0) + 1.0) % 1.0
@@ -258,6 +528,60 @@ pub fn breathing_frames(led_count: usize, frame_count: usize, color: [u8; 3], br
             vec![led; led_count]
         })
         .collect()
+}
+
+/// Colors the first `edge_count` LEDs (if `color_start`) and/or last
+/// `edge_count` LEDs (if `color_end`) of every physical strip (see
+/// `strip_bounds`) by copying from `edge_source` (another frame of the same
+/// length) instead of a flat color — lets the edges run their own animated
+/// effect, independent of the middle. This colors along each strip's own
+/// length — e.g. the two tips of a single strip glued around a case edge.
+pub fn apply_edge_frame(
+    frame: &mut [[u8; 3]],
+    edge_source: &[[u8; 3]],
+    strip_count: usize,
+    edge_count: usize,
+    color_start: bool,
+    color_end: bool,
+) {
+    let bounds = strip_bounds(frame.len(), strip_count);
+    for w in bounds.windows(2) {
+        let (start, end) = (w[0], w[1]);
+        let n = edge_count.min(end - start);
+        if color_start {
+            frame[start..start + n].copy_from_slice(&edge_source[start..start + n]);
+        }
+        if color_end {
+            frame[end - n..end].copy_from_slice(&edge_source[end - n..end]);
+        }
+    }
+}
+
+/// Same as `apply_edge_frame`, but selects whole physical strips (see
+/// `strip_bounds`) instead of a LED count within each — e.g. the outer
+/// strands of a Strimer cable, leaving the inner strands to the middle.
+pub fn apply_edge_strips_frame(
+    frame: &mut [[u8; 3]],
+    edge_source: &[[u8; 3]],
+    strip_count: usize,
+    edge_strips: usize,
+    color_start: bool,
+    color_end: bool,
+) {
+    let bounds = strip_bounds(frame.len(), strip_count);
+    let n_strips = bounds.len().saturating_sub(1);
+    let n = edge_strips.min(n_strips);
+    if color_start {
+        for i in 0..n {
+            frame[bounds[i]..bounds[i + 1]].copy_from_slice(&edge_source[bounds[i]..bounds[i + 1]]);
+        }
+    }
+    if color_end {
+        for i in 0..n {
+            frame[bounds[n_strips - 1 - i]..bounds[n_strips - i]]
+                .copy_from_slice(&edge_source[bounds[n_strips - 1 - i]..bounds[n_strips - i]]);
+        }
+    }
 }
 
 /// Milliseconds per on/off step of the "Identify" blink.

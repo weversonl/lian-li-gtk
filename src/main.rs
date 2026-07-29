@@ -13,9 +13,9 @@ mod identify;
 mod ipc_client;
 mod last_effect;
 mod pages;
+mod profiles;
 mod rgb_persist;
 mod tray;
-mod widgets;
 mod window;
 
 use gtk::glib;

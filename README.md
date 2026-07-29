@@ -28,15 +28,21 @@ I use a fully wireless Lian Li setup (fans + Strimer cables over the RF dongle, 
 
 - **Dashboard** — sidebar of every detected device (wired and wireless) with live telemetry (RPM, temps, pump speed) and quick actions.
 - **RGB Editor** — per-device, per-zone effect editor. The mode list is built dynamically from whatever the daemon reports via `GetRgbCapabilities` for that specific device, not a hardcoded list.
-  - Wireless devices (which only ever report `Static`/`Direct` at the protocol level) additionally get a client-rendered animation set: Rainbow, Rainbow Morph, Breathing, and **Gradient Wave** (an OpenRGB-style custom multi-color wave, up to 8 gradient stops), all turned into raw frames on the client and streamed to the device.
-  - Per-device wave direction and "LED strip count" (for cables that concatenate several physical strips into one flat buffer) are remembered individually.
-- **Global Effects** — apply one effect (Static, Rainbow, Rainbow Morph, Breathing, Gradient Wave) with shared color/speed/brightness/direction across every RGB-capable device at once, wired and wireless alike. Rainbow treats every wireless device as a segment of one continuous virtual strip, in a user-configurable device order.
+  - Wireless devices (which only ever report `Static`/`Direct` at the protocol level) additionally get a client-rendered animation set: Rainbow, Rainbow Morph, Breathing, **Gradient Wave** (an OpenRGB-style custom multi-color wave, up to 8 gradient stops), and an L-Connect-style **Meteor** family (Meteor, Meteor Rainbow, Meteor Split) — all turned into raw frames on the client and streamed to the device.
+  - **Segments** — split a strip into an edge/middle zone, each with its own solid color or independent animated effect.
+  - Per-device wave direction, an invert-direction fix for physically reversed wiring, LED strip count (for cables that concatenate several physical strips into one flat buffer), and Meteor's linear-vs-circular (ring) topology are all remembered individually per device.
+- **Global Effects** — apply one effect (Static, Rainbow, Rainbow Morph, Breathing, Gradient Wave, or the Meteor family, including a device-to-device Meteor relay) with shared color/speed/brightness/direction across every RGB-capable device at once, wired and wireless alike.
+  - Rainbow and the Meteor relay treat every wireless device as a segment of one continuous virtual strip/relay chain, walking through a user-configurable device order — the same idea as L-Connect 3's cross-device sync.
+  - **Sincronizar Efeito** — chains devices through one full turn each in sequence instead of every device looping independently at the same time.
+- **Perfis (Profiles)** — save the entire current setup (RGB effects/colors per device, fan curves, LCD content, device order and sync settings) under a name, and switch back to it in one click. Captures both what the daemon persists on its own and the client-rendered wireless animations/Segments state that never round-trip through the daemon's config.
 - **Fan Curve** — create, edit, and assign temperature → PWM curves per fan, with a draggable-point curve editor.
 - **LCD Content** — preview and push image/video/GIF/color/sensor content to Strimer LCD displays.
 - **Wireless Pairing** — bind/unbind devices to the RF dongle.
 - **Preferences** — daemon status, OpenRGB bridge port, accent color, saved RGB presets (deleting a preset never resets the hardware — it only removes it from the list), language (English/Portuguese).
 - **System tray** — minimize to tray instead of quitting; optional autostart on login.
 - **Wireless-drift resilience** — applied effects are written through to the daemon's own config, so its existing auto-resync mechanism (which fixes a wireless device's firmware resetting its lighting on its own) replays the _current_ effect instead of stale leftover state.
+  - The last effect applied to every device — including client-rendered wireless animations and Segments presets, neither of which live in the daemon's config — is automatically reapplied on reconnect, on app reopen after a reboot, and via the Identify button.
+  - A periodic heartbeat quietly re-sends a running wireless animation every 20s, guarding against a device's firmware silently resetting its lighting to factory defaults without ever actually dropping off — all synced devices restart in lockstep so a cross-device relay never drifts out of phase.
 
 ## Tech stack
 

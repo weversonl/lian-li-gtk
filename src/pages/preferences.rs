@@ -7,7 +7,6 @@
 
 use crate::app_prefs::Lang;
 use crate::context::Ctx;
-use crate::widgets::segmented_control;
 use adw::prelude::*;
 use gtk::glib;
 use lianli_shared::ipc::{IpcRequest, TelemetrySnapshot};
@@ -49,17 +48,18 @@ fn general_page(ctx: &Rc<Ctx>) -> adw::PreferencesPage {
     page.add(&daemon_group);
 
     let lang_group = adw::PreferencesGroup::new();
-    let lang_row = adw::ActionRow::builder()
+    const LANGS: [Lang; 2] = [Lang::En, Lang::PtBr];
+    let lang_names = gtk::StringList::new(&[ctx.t("prefs.lang_en"), ctx.t("prefs.lang_pt")]);
+    let lang_row = adw::ComboRow::builder()
         .title(ctx.t("prefs.language"))
         .subtitle(ctx.t("prefs.language_subtitle"))
+        .model(&lang_names)
         .build();
-    let lang_names = [ctx.t("prefs.lang_en"), ctx.t("prefs.lang_pt")];
-    let initial_lang_index = if ctx.lang() == Lang::PtBr { 1 } else { 0 };
+    lang_row.set_selected(LANGS.iter().position(|l| *l == ctx.lang()).unwrap_or(0) as u32);
     {
         let ctx = ctx.clone();
-        lang_row.add_suffix(&segmented_control::build(&lang_names, initial_lang_index, move |i| {
-            let new_lang = if i == 1 { Lang::PtBr } else { Lang::En };
-            // Skip the initial-selection callback fired by `build` itself.
+        lang_row.connect_selected_notify(move |row| {
+            let Some(new_lang) = LANGS.get(row.selected() as usize).copied() else { return };
             if new_lang == ctx.lang() {
                 return;
             }
@@ -67,7 +67,7 @@ fn general_page(ctx: &Rc<Ctx>) -> adw::PreferencesPage {
             ctx.toast_with_button(ctx.t("prefs.language_toast"), ctx.t("prefs.restart_now"), || {
                 crate::restart();
             });
-        }));
+        });
     }
     lang_group.add(&lang_row);
     page.add(&lang_group);

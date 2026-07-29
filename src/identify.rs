@@ -27,8 +27,28 @@ async fn send_delay() {
 const MAX_ATTEMPTS: u32 = 3;
 
 pub async fn reapply_last_effect(ctx: &Rc<Ctx>, device_id: &str) -> bool {
+    reapply_last_effect_inner(ctx, device_id, true).await
+}
+
+async fn reapply_last_effect_inner(ctx: &Rc<Ctx>, device_id: &str, notify_on_failure: bool) -> bool {
     // Let the link settle before pushing anything.
     glib::timeout_future(Duration::from_millis(400)).await;
+
+    // A Segments preset (RGB Editor's "Dividir em Duas Zonas") never goes
+    // through `Ctx::record_frames`/`record_static_effect` below — it's
+    // scoped per zone via `SetRgbDirect`, not a whole-device send, and an
+    // animated one only exists as a running client-side loop with nothing
+    // to "resend". Re-deriving it from the saved editor snapshot and
+    // restarting `apply_segments` is the only way to actually bring back
+    // what the user last configured, instead of falling through to a
+    // stale (or absent) `LastEffect` recording.
+    if let Some(snapshot) = ctx.editor_snapshot_for(device_id) {
+        if snapshot.segments_enabled {
+            let is_wireless = device_id.starts_with("wireless:");
+            crate::pages::rgb_editor::apply_segments_from_snapshot(ctx, device_id, is_wireless, &snapshot).await;
+            return true;
+        }
+    }
 
     match ctx.last_effect_for(device_id) {
         Some(LastEffect::Frames(frames, interval_ms, _mode)) => {
@@ -45,7 +65,7 @@ pub async fn reapply_last_effect(ctx: &Rc<Ctx>, device_id: &str) -> bool {
                 }
                 glib::timeout_future(Duration::from_millis(IDENTIFY_SEND_DELAY_MS * (attempt as u64 + 1))).await;
             }
-            if !ok {
+            if !ok && notify_on_failure {
                 ctx.toast(ctx.t("identify.failed_reapply"));
             }
             ok
@@ -69,13 +89,75 @@ pub async fn reapply_last_effect(ctx: &Rc<Ctx>, device_id: &str) -> bool {
                 all_ok &= zone_ok;
                 send_delay().await;
             }
-            if !all_ok {
+            if !all_ok && notify_on_failure {
                 ctx.toast(ctx.t("identify.failed_reapply"));
             }
             all_ok
         }
         None => false,
     }
+}
+
+/// Guards against the firmware silently resetting a wireless device's
+/// lighting to its factory default (seen as a brief white flash, then
+/// Rainbow) without ever actually dropping from `ListDevices` — since
+/// nothing disappears from the device list, `start_polling`'s reconnect
+/// diffing never fires, and a whole-device `SetRgbFrames` animation (looped
+/// on the device itself, sent only once) is lost for good. Periodically
+/// re-sending it bounds how long a glitch like that can last, instead of
+/// requiring the user to notice and manually reapply. Segments are excluded
+/// since that feature already re-sends its own frames continuously via a
+/// live client-side loop (see `pages::rgb_editor::apply_segments`) and self-heals
+/// on its own; re-triggering it here would just restart it for no reason.
+///
+/// A cross-device "Sincronizar Efeito" relay (see
+/// `global_effects::stagger_across_devices`) has its phase baked into each
+/// device's own frame buffer — every device restarts at frame 0 of an
+/// identical-length loop, so as long as they all restart at (approximately)
+/// the same instant they stay in relay lockstep. That's why this fires every
+/// device's resend *concurrently* in one go, with no per-device settle
+/// delay or retry backoff (unlike `reapply_last_effect`, which is built for
+/// a just-reconnected single device and can afford to take its time) —
+/// staggering them here, even by a few hundred ms, would introduce a
+/// permanent phase drift between devices that never corrects itself.
+const HEARTBEAT_SECS: u64 = 20;
+
+pub fn spawn_frame_heartbeat(ctx: &Rc<Ctx>) {
+    let ctx = ctx.clone();
+    glib::spawn_future_local(async move {
+        loop {
+            glib::timeout_future(Duration::from_secs(HEARTBEAT_SECS)).await;
+
+            let device_ids: Vec<String> = ctx
+                .state
+                .borrow()
+                .devices
+                .iter()
+                .map(|d| d.device_id.clone())
+                .filter(|id| id.starts_with("wireless:"))
+                .collect();
+
+            for device_id in device_ids {
+                let has_segments =
+                    ctx.editor_snapshot_for(&device_id).is_some_and(|s| s.segments_enabled);
+                let Some(LastEffect::Frames(frames, interval_ms, _)) = ctx.last_effect_for(&device_id) else {
+                    continue;
+                };
+                if has_segments {
+                    continue;
+                }
+                // Spawned rather than awaited in-line: all eligible devices'
+                // sends get issued back-to-back within this same tick,
+                // instead of one finishing (with its own IPC round-trip
+                // latency) before the next even starts.
+                let ctx = ctx.clone();
+                glib::spawn_future_local(async move {
+                    let request = IpcRequest::SetRgbFrames { device_id, frames, interval_ms };
+                    let _ = ctx.client.call_unit(request).await;
+                });
+            }
+        }
+    });
 }
 
 pub async fn identify(ctx: &Rc<Ctx>, device_id: &str) {

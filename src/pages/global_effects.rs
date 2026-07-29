@@ -11,11 +11,11 @@
 use crate::context::Ctx;
 use crate::direction::{self, wave_direction_label, WAVE_DIRECTIONS};
 use crate::effects::{
-    breathing_frames, custom_gradient_wave_frames, fps_to_interval_ms, frame_count_for, mode_uses_color,
-    percent_to_brightness4, percent_to_cycle_ms, percent_to_speed4, rainbow_morph_frames, rainbow_wave_frames,
-    scale_color,
+    breathing_frames, custom_gradient_wave_frames, fps_to_interval_ms, frame_count_for, meteor_chase_frames,
+    meteor_frames, meteor_pause_frames, meteor_relay_across_devices, mode_uses_color, percent_to_brightness4,
+    percent_to_cycle_ms, percent_to_speed4, rainbow_morph_frames, rainbow_wave_frames, scale_color,
+    stagger_across_devices,
 };
-use crate::widgets::segmented_control;
 use adw::prelude::*;
 use gtk::glib;
 use lianli_shared::ipc::{DeviceInfo, IpcRequest};
@@ -24,20 +24,64 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-const MODES: [RgbMode; 5] =
-    [RgbMode::Static, RgbMode::Rainbow, RgbMode::RainbowMorph, RgbMode::Breathing, RgbMode::ColorCycle];
+const MODES: [RgbMode; 9] = [
+    RgbMode::Static,
+    RgbMode::Rainbow,
+    RgbMode::RainbowMorph,
+    RgbMode::Breathing,
+    RgbMode::ColorCycle,
+    RgbMode::Meteor,
+    RgbMode::MeteorShower,
+    RgbMode::Runway,
+    RgbMode::TailChasing,
+];
 
-/// `ColorCycle` is repurposed here exactly like in `rgb_editor` — wireless
-/// only, wired devices are skipped for this mode (see `apply_global_effect`).
+/// `ColorCycle`, `MeteorShower`, `Runway` and `TailChasing` are repurposed
+/// here exactly like in `rgb_editor` — wireless only, wired devices are
+/// skipped for all four (see `apply_global_effect`), since a wired device
+/// with genuine native support would otherwise get its real,
+/// differently-behaving mode under these misleading labels.
+/// `Meteor`/`MeteorShower` merge every physical strip into one continuous
+/// meteor (`meteor_frames`); `Runway` is a strip-by-strip relay within one
+/// device (`meteor_chase_frames`); `TailChasing` is that same relay idea
+/// promoted to whole *devices*, in the device order set below
+/// (`meteor_relay_across_devices`) — this one only exists here, since a
+/// single-device page has no other devices to relay across.
 fn mode_label(mode: RgbMode) -> &'static str {
     if mode == RgbMode::ColorCycle {
         "Gradient Wave"
+    } else if mode == RgbMode::MeteorShower {
+        "Meteor (Rainbow)"
+    } else if mode == RgbMode::Runway {
+        "Meteor (Split)"
+    } else if mode == RgbMode::TailChasing {
+        "Meteor (Relay)"
     } else {
         mode.display_name()
     }
 }
 
-const SLIDER_WIDTH: i32 = 220;
+/// Modes where every device otherwise just loops its own independent copy
+/// at once — "Sincronizar Efeito" chains them instead, one device's full
+/// turn at a time, same idea as `TailChasing`/"Meteor (Relay)" but as an
+/// opt-in flag for any of these rather than its own dedicated mode. Static
+/// has nothing to chain (an instant color, not an animation); Rainbow
+/// already has its own always-on cross-device wave; `TailChasing` already
+/// *is* this, so the flag would be redundant there.
+fn supports_sync(mode: RgbMode) -> bool {
+    matches!(
+        mode,
+        RgbMode::RainbowMorph
+            | RgbMode::Breathing
+            | RgbMode::ColorCycle
+            | RgbMode::Meteor
+            | RgbMode::MeteorShower
+            | RgbMode::Runway
+    )
+}
+
+const SLIDER_WIDTH: i32 = 260;
+const SLIDER_VALUE_LABEL_WIDTH: i32 = 44;
 
 /// Gap between back-to-back IPC sends — the daemon acks as soon as a
 /// command is queued on the RF dongle, so no gap risks dropped commands.
@@ -51,6 +95,35 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
     let header = adw::HeaderBar::new();
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
+
+    // A slider with marks (like FPS) or next to a short one-line title
+    // (like "Brilho") can still end up allocated more or less than the
+    // others, since the row hands over whatever space is left after the
+    // label. Wrapping each in its own fixed-`width_request` `Box` pins
+    // every slider to the same width regardless of marks or label length.
+    // The value is drawn in a separate fixed-width label *outside* the
+    // scale (rather than `draw_value`) so the trough itself never shrinks
+    // to make room for a wider number like "100%".
+    let slider_wrap = |scale: &gtk::Scale, format: fn(f64) -> String| -> gtk::Box {
+        scale.set_draw_value(false);
+        scale.set_hexpand(true);
+        let value_label = gtk::Label::builder()
+            .label(format(scale.value()))
+            .width_request(SLIDER_VALUE_LABEL_WIDTH)
+            .xalign(0.0)
+            .css_classes(["dim-label"])
+            .build();
+        {
+            let value_label = value_label.clone();
+            scale.connect_value_changed(move |s| value_label.set_label(&format(s.value())));
+        }
+        let wrap = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        wrap.set_hexpand(false);
+        wrap.set_width_request(SLIDER_WIDTH);
+        wrap.append(scale);
+        wrap.append(&value_label);
+        wrap
+    };
 
     let scrolled = gtk::ScrolledWindow::builder().vexpand(true).build();
     let clamp = adw::Clamp::builder().maximum_size(640).build();
@@ -81,7 +154,13 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
     let mode_names: Vec<&str> = MODES.iter().map(|m| mode_label(*m)).collect();
     let initial_mode_index = MODES.iter().position(|m| *m == ctx.global_effect_mode()).unwrap_or(1);
     let mode_index = Rc::new(Cell::new(initial_mode_index));
-    let mode_row = adw::ActionRow::builder().title(ctx.t("ge.effect")).title_lines(1).build();
+    // A `ComboRow`, not `segmented_control` — that widget is documented for
+    // short option lists only, and 9 modes (some with long labels like
+    // "Meteor (Rainbow)") overflowed the pill row wide enough that clicks
+    // on the later options landed on the wrong one.
+    let mode_model = gtk::StringList::new(&mode_names);
+    let mode_row = adw::ComboRow::builder().title(ctx.t("ge.effect")).model(&mode_model).build();
+    mode_row.set_selected(initial_mode_index as u32);
 
     let single_color_mode = |m: RgbMode| mode_uses_color(m) && m != RgbMode::ColorCycle;
     let color_row = adw::ActionRow::builder()
@@ -89,13 +168,56 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
         .subtitle(ctx.t("ge.color_subtitle"))
         .visible(single_color_mode(MODES[mode_index.get()]))
         .build();
+    let saved_ge = ctx.global_effect_controls();
     let color_dialog = gtk::ColorDialog::builder().with_alpha(false).build();
     let color_button = gtk::ColorDialogButton::builder()
         .dialog(&color_dialog)
-        .rgba(&gtk::gdk::RGBA::new(1.0, 1.0, 1.0, 1.0))
+        .rgba(&gtk::gdk::RGBA::new(
+            saved_ge.color[0] as f32 / 255.0,
+            saved_ge.color[1] as f32 / 255.0,
+            saved_ge.color[2] as f32 / 255.0,
+            1.0,
+        ))
         .valign(gtk::Align::Center)
         .build();
     color_row.add_suffix(&color_button);
+
+    let meteor_tail_row = adw::ActionRow::builder()
+        .title(ctx.t("ge.meteor_tail"))
+        .subtitle(ctx.t("ge.meteor_tail_subtitle"))
+        .visible(matches!(MODES[mode_index.get()], RgbMode::Meteor | RgbMode::Runway | RgbMode::TailChasing))
+        .build();
+    let meteor_tail_dialog = gtk::ColorDialog::builder().with_alpha(false).build();
+    let meteor_tail_button = gtk::ColorDialogButton::builder()
+        .dialog(&meteor_tail_dialog)
+        .rgba(&gtk::gdk::RGBA::new(
+            saved_ge.meteor_tail[0] as f32 / 255.0,
+            saved_ge.meteor_tail[1] as f32 / 255.0,
+            saved_ge.meteor_tail[2] as f32 / 255.0,
+            1.0,
+        ))
+        .valign(gtk::Align::Center)
+        .build();
+    meteor_tail_row.add_suffix(&meteor_tail_button);
+
+    let meteor_pause_row = adw::ActionRow::builder()
+        .title(ctx.t("rgb_editor.meteor_pause"))
+        .subtitle(ctx.t("rgb_editor.meteor_pause_subtitle"))
+        .visible(matches!(MODES[mode_index.get()], RgbMode::Meteor | RgbMode::MeteorShower | RgbMode::Runway | RgbMode::TailChasing))
+        .build();
+    let meteor_pause_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 30.0, 1.0);
+    meteor_pause_scale.set_value(saved_ge.meteor_pause_secs);
+    meteor_pause_scale.set_hexpand(false);
+    meteor_pause_row.add_suffix(&slider_wrap(&meteor_pause_scale, |v| format!("{v:.0}s")));
+
+    let sync_devices_row = adw::ActionRow::builder()
+        .title(ctx.t("ge.sync_devices"))
+        .subtitle(ctx.t("ge.sync_devices_subtitle"))
+        .visible(supports_sync(MODES[mode_index.get()]))
+        .build();
+    let sync_devices_switch =
+        gtk::Switch::builder().valign(gtk::Align::Center).active(saved_ge.sync_devices).build();
+    sync_devices_row.add_suffix(&sync_devices_switch);
 
     let gradient_colors: Rc<RefCell<[[u8; 3]; 8]>> = Rc::new(RefCell::new(ctx.gradient_colors()));
     let gradient_row = adw::ActionRow::builder()
@@ -136,52 +258,58 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
         let mode_index = mode_index.clone();
         let color_row = color_row.clone();
         let gradient_row = gradient_row.clone();
+        let meteor_tail_row = meteor_tail_row.clone();
+        let meteor_pause_row = meteor_pause_row.clone();
+        let sync_devices_row = sync_devices_row.clone();
         let ctx = ctx.clone();
-        mode_row.add_suffix(&segmented_control::build(&mode_names, initial_mode_index, move |i| {
+        mode_row.connect_selected_notify(move |row| {
+            let i = row.selected() as usize;
+            let Some(mode) = MODES.get(i).copied() else { return };
             mode_index.set(i);
-            ctx.set_global_effect_mode(MODES[i]);
-            color_row.set_visible(single_color_mode(MODES[i]));
-            gradient_row.set_visible(MODES[i] == RgbMode::ColorCycle);
-        }));
+            ctx.set_global_effect_mode(mode);
+            color_row.set_visible(single_color_mode(mode));
+            gradient_row.set_visible(mode == RgbMode::ColorCycle);
+            meteor_tail_row.set_visible(matches!(mode, RgbMode::Meteor | RgbMode::Runway | RgbMode::TailChasing));
+            meteor_pause_row.set_visible(matches!(
+                mode,
+                RgbMode::Meteor | RgbMode::MeteorShower | RgbMode::Runway | RgbMode::TailChasing
+            ));
+            sync_devices_row.set_visible(supports_sync(mode));
+        });
     }
     controls_group.add(&mode_row);
     controls_group.add(&color_row);
+    controls_group.add(&meteor_tail_row);
     controls_group.add(&gradient_row);
 
     let speed_row = adw::ActionRow::builder().title(ctx.t("ge.speed")).build();
     let speed_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
-    speed_scale.set_value(30.0);
+    speed_scale.set_value(saved_ge.speed_percent);
     speed_scale.set_hexpand(false);
-    speed_scale.set_size_request(SLIDER_WIDTH, -1);
-    speed_scale.set_draw_value(true);
-    speed_scale.set_value_pos(gtk::PositionType::Right);
-    speed_scale.set_format_value_func(|_, value| format!("{value:.0}%"));
-    speed_row.add_suffix(&speed_scale);
+    speed_row.add_suffix(&slider_wrap(&speed_scale, |v| format!("{v:.0}%")));
     controls_group.add(&speed_row);
+
+    controls_group.add(&sync_devices_row);
 
     let fps_row = adw::ActionRow::builder()
         .title(ctx.t("ge.fps"))
         .subtitle(ctx.t("ge.fps_subtitle"))
         .build();
     let fps_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 5.0, 60.0, 1.0);
-    fps_scale.set_value(30.0);
+    fps_scale.set_value(saved_ge.fps);
     fps_scale.set_hexpand(false);
-    fps_scale.set_size_request(SLIDER_WIDTH, -1);
-    fps_scale.set_draw_value(true);
-    fps_scale.set_value_pos(gtk::PositionType::Right);
-    fps_scale.set_format_value_func(|_, value| format!("{value:.0} fps"));
     fps_scale.add_mark(15.0, gtk::PositionType::Bottom, Some("15"));
     fps_scale.add_mark(30.0, gtk::PositionType::Bottom, Some("30"));
     fps_scale.add_mark(60.0, gtk::PositionType::Bottom, Some("60"));
-    fps_row.add_suffix(&fps_scale);
-    controls_group.add(&fps_row);
+    fps_row.add_suffix(&slider_wrap(&fps_scale, |v| format!("{v:.0}")));
 
     let range_row = adw::ActionRow::builder().title(ctx.t("ge.over_60fps")).build();
+    let range_switch = gtk::Switch::builder().valign(gtk::Align::Center).active(false).build();
     {
         let fps_scale = fps_scale.clone();
-        let control = segmented_control::build(&[ctx.t("ge.standard"), ctx.t("ge.extended")], 0, move |i| {
+        range_switch.connect_state_set(move |_, extended| {
             fps_scale.clear_marks();
-            if i == 1 {
+            if extended {
                 fps_scale.set_range(5.0, 120.0);
                 fps_scale.add_mark(15.0, gtk::PositionType::Bottom, Some("15"));
                 fps_scale.add_mark(30.0, gtk::PositionType::Bottom, Some("30"));
@@ -198,21 +326,20 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
                 fps_scale.add_mark(60.0, gtk::PositionType::Bottom, Some("60"));
                 fps_scale.remove_css_class("fps-warning-zone");
             }
+            glib::Propagation::Proceed
         });
-        range_row.add_suffix(&control);
     }
+    range_row.add_suffix(&range_switch);
     controls_group.add(&range_row);
+    controls_group.add(&fps_row);
 
     let brightness_row = adw::ActionRow::builder().title(ctx.t("ge.brightness")).build();
     let brightness_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
-    brightness_scale.set_value(25.0);
+    brightness_scale.set_value(saved_ge.brightness_percent);
     brightness_scale.set_hexpand(false);
-    brightness_scale.set_size_request(SLIDER_WIDTH, -1);
-    brightness_scale.set_draw_value(true);
-    brightness_scale.set_value_pos(gtk::PositionType::Right);
-    brightness_scale.set_format_value_func(|_, value| format!("{value:.0}%"));
-    brightness_row.add_suffix(&brightness_scale);
+    brightness_row.add_suffix(&slider_wrap(&brightness_scale, |v| format!("{v:.0}%")));
     controls_group.add(&brightness_row);
+    controls_group.add(&meteor_pause_row);
 
     let direction_row = adw::ActionRow::builder()
         .title(ctx.t("ge.global_orientation"))
@@ -221,10 +348,13 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
         .build();
     let direction_names: Vec<&str> = WAVE_DIRECTIONS.iter().map(|d| wave_direction_label(*d, ctx.lang())).collect();
     let global_direction = Rc::new(Cell::new(RgbDirection::Up));
-    let direction_control = segmented_control::build(&direction_names, 0, {
+    let direction_model = gtk::StringList::new(&direction_names);
+    let direction_control = adw::ComboRow::builder().model(&direction_model).build();
+    direction_control.set_selected(0);
+    direction_control.connect_selected_notify({
         let global_direction = global_direction.clone();
-        move |i| {
-            if let Some(d) = WAVE_DIRECTIONS.get(i) {
+        move |row| {
+            if let Some(d) = WAVE_DIRECTIONS.get(row.selected() as usize) {
                 global_direction.set(*d);
             }
         }
@@ -236,8 +366,8 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
     direction_row.add_suffix(&direction_enabled_switch);
     controls_group.add(&direction_row);
 
-    let direction_value_row = adw::ActionRow::builder().title(ctx.t("ge.direction")).build();
-    direction_value_row.add_suffix(&direction_control);
+    let direction_value_row = direction_control.clone();
+    direction_value_row.set_title(ctx.t("ge.direction"));
     controls_group.add(&direction_value_row);
 
     {
@@ -256,7 +386,10 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
         .title(ctx.t("ge.included_devices"))
         .description(ctx.t("ge.included_devices_desc"))
         .build();
-    let devices_list = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let devices_list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .build();
     devices_group.add(&devices_list);
     content.append(&devices_group);
 
@@ -278,10 +411,9 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
 
     let apply_button = gtk::Button::builder()
         .label(ctx.t("ge.apply_all"))
-        .css_classes(["suggested-action", "pill"])
+        .css_classes(["suggested-action"])
         .build();
-    apply_button.set_margin_top(8);
-    content.append(&apply_button);
+    header.pack_end(&apply_button);
 
     {
         let ctx = ctx.clone();
@@ -291,6 +423,7 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
         let mode_index = mode_index.clone();
         let global_direction = global_direction.clone();
         let gradient_colors = gradient_colors.clone();
+        let sync_devices_switch = sync_devices_switch.clone();
         apply_button.connect_clicked(move |_| {
             let ctx = ctx.clone();
             let devices = ordered_devices.borrow().clone();
@@ -303,17 +436,37 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
                 (rgba.green() * 255.0) as u8,
                 (rgba.blue() * 255.0) as u8,
             ];
+            let tail_rgba = meteor_tail_button.rgba();
+            let meteor_tail = [
+                (tail_rgba.red() * 255.0) as u8,
+                (tail_rgba.green() * 255.0) as u8,
+                (tail_rgba.blue() * 255.0) as u8,
+            ];
             let gradient = *gradient_colors.borrow();
             let speed_percent = speed_scale.value();
             let fps = fps_scale.value();
             let brightness_percent = brightness_scale.value();
+            let meteor_pause_secs = meteor_pause_scale.value();
+            let sync_devices_value = sync_devices_switch.is_active();
             let global_dir = global_direction.get();
+            ctx.set_global_effect_controls(crate::context::GlobalEffectControls {
+                color,
+                meteor_tail,
+                speed_percent,
+                fps,
+                brightness_percent,
+                meteor_pause_secs,
+                sync_devices: sync_devices_value,
+            });
             glib::spawn_future_local(async move {
                 apply_global_effect(
                     &ctx,
                     &devices,
                     mode,
                     color,
+                    meteor_tail,
+                    meteor_pause_secs,
+                    sync_devices_value,
                     gradient,
                     speed_percent,
                     fps,
@@ -339,7 +492,7 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
 }
 
 fn render_device_order(
-    list_box: &gtk::Box,
+    list_box: &gtk::ListBox,
     ordered_devices: &Rc<RefCell<Vec<DeviceInfo>>>,
     device_directions: &Rc<RefCell<HashMap<String, RgbDirection>>>,
     device_segments: &Rc<RefCell<HashMap<String, usize>>>,
@@ -359,8 +512,15 @@ fn render_device_order(
     let direction_names: Vec<&str> = WAVE_DIRECTIONS.iter().map(|d| wave_direction_label(*d, ctx.lang())).collect();
     let count = devices.len();
     for (i, device) in devices.iter().enumerate() {
-        let row = adw::ActionRow::builder().title(ctx.display_name(device)).title_lines(1).build();
-        row.add_prefix(&gtk::Label::new(Some(&(i + 1).to_string())));
+        let row = adw::ExpanderRow::builder()
+            .title(ctx.display_name(device))
+            .title_lines(1)
+            .build();
+        let index_label = gtk::Label::builder()
+            .label((i + 1).to_string())
+            .css_classes(["dim-label"])
+            .build();
+        row.add_prefix(&index_label);
 
         let up_button = gtk::Button::builder()
             .icon_name("go-up-symbolic")
@@ -418,7 +578,6 @@ fn render_device_order(
 
         row.add_suffix(&up_button);
         row.add_suffix(&down_button);
-        list_box.append(&row);
 
         // Priority: touched this session, then saved prefs, then global default.
         let saved_prefs = ctx.rgb_prefs_for_opt(&device.device_id);
@@ -433,7 +592,10 @@ fn render_device_order(
         // reads this map and must not see it empty for an untouched device.
         device_directions.borrow_mut().insert(device.device_id.clone(), current_dir);
 
-        let direction_row2 = adw::ActionRow::builder().title(ctx.t("ge.direction")).build();
+        let direction_model2 = gtk::StringList::new(&direction_names);
+        let direction_row2 =
+            adw::ComboRow::builder().title(ctx.t("ge.direction")).model(&direction_model2).build();
+        direction_row2.set_selected(selected_index as u32);
         // Physical LED strips concatenated in this device's flat buffer.
         // `1` treats it as one continuous strip.
         let current_strip_count = device_segments
@@ -449,15 +611,16 @@ fn render_device_order(
             let device_segments = device_segments.clone();
             let device_id = device.device_id.clone();
             let ctx = ctx.clone();
-            direction_row2.add_suffix(&segmented_control::build(&direction_names, selected_index, move |idx| {
-                if let Some(d) = WAVE_DIRECTIONS.get(idx) {
+            direction_row2.connect_selected_notify(move |row| {
+                if let Some(d) = WAVE_DIRECTIONS.get(row.selected() as usize) {
                     device_directions.borrow_mut().insert(device_id.clone(), *d);
                     let strips = device_segments.borrow().get(&device_id).copied().unwrap_or(current_strip_count);
-                    ctx.set_rgb_prefs(&device_id, *d, strips);
+                    let prefs = ctx.rgb_prefs_for(&device_id);
+                    ctx.set_rgb_prefs(&device_id, *d, strips, prefs.invert_direction, prefs.meteor_circular);
                 }
-            }));
+            });
         }
-        list_box.append(&direction_row2);
+        row.add_row(&direction_row2);
 
         let merge_row = adw::ActionRow::builder().title(ctx.t("ge.led_strips")).build();
         let merge_adj = gtk::Adjustment::new(current_strip_count as f64, 1.0, 32.0, 1.0, 1.0, 0.0);
@@ -473,11 +636,14 @@ fn render_device_order(
                 let strips = adj.value() as usize;
                 device_segments.borrow_mut().insert(device_id.clone(), strips);
                 let dir = device_directions.borrow().get(&device_id).copied().unwrap_or_else(|| global_direction.get());
-                ctx.set_rgb_prefs(&device_id, dir, strips);
+                let prefs = ctx.rgb_prefs_for(&device_id);
+                ctx.set_rgb_prefs(&device_id, dir, strips, prefs.invert_direction, prefs.meteor_circular);
             });
         }
         merge_row.add_suffix(&merge_spin);
-        list_box.append(&merge_row);
+        row.add_row(&merge_row);
+
+        list_box.append(&row);
     }
 }
 
@@ -486,6 +652,9 @@ async fn apply_global_effect(
     devices: &[DeviceInfo],
     mode: RgbMode,
     color: [u8; 3],
+    meteor_tail: [u8; 3],
+    meteor_pause_secs: f64,
+    sync_devices: bool,
     gradient_colors: [[u8; 3]; 8],
     speed_percent: f64,
     fps: f64,
@@ -509,12 +678,20 @@ async fn apply_global_effect(
     let cycle_ms = percent_to_cycle_ms(speed_percent);
     let frame_count = frame_count_for(fps, cycle_ms);
     let interval_ms = fps_to_interval_ms(fps);
+    let pause_frames = meteor_pause_frames(interval_ms, meteor_pause_secs);
     let wired_speed = percent_to_speed4(speed_percent);
     let wired_brightness = percent_to_brightness4(brightness_percent);
     let brightness_factor = (brightness_percent / 100.0).clamp(0.0, 1.0) as f32;
     let resolve_direction = |device_id: &str| -> RgbDirection {
         device_directions.get(device_id).copied().unwrap_or(global_direction)
     };
+    // Per-device wiring-order fix set in the RGB Editor page (see
+    // `DeviceRgbPrefs::invert_direction`) — applies here too, so it doesn't
+    // need to be set separately per surface.
+    let resolve_reverse =
+        |device_id: &str| -> bool { direction::effective_reverse(resolve_direction(device_id), ctx.rgb_prefs_for(device_id).invert_direction) };
+    // Per-device Meteor ring-vs-strip topology, same source as above.
+    let resolve_circular = |device_id: &str| -> bool { ctx.rgb_prefs_for(device_id).meteor_circular };
 
     let wireless: Vec<&DeviceInfo> = devices.iter().filter(|d| d.device_id.starts_with("wireless:")).collect();
     let wired: Vec<&DeviceInfo> = devices.iter().filter(|d| !d.device_id.starts_with("wireless:")).collect();
@@ -523,9 +700,12 @@ async fn apply_global_effect(
     let mut failed = 0usize;
     let mut to_persist: Vec<(String, Vec<(u8, RgbEffect)>)> = Vec::new();
 
-    // ColorCycle (Gradient Wave) is wireless-only, so wired devices skip it.
+    // ColorCycle (Gradient Wave), MeteorShower (rainbow-headed Meteor),
+    // Runway (strip-by-strip Meteor relay) and TailChasing (device-by-device
+    // Meteor relay) are wireless-only repurposed modes, so wired devices
+    // skip all four.
     for device in &wired {
-        if mode == RgbMode::ColorCycle {
+        if matches!(mode, RgbMode::ColorCycle | RgbMode::MeteorShower | RgbMode::Runway | RgbMode::TailChasing) {
             continue;
         }
         let zone_count = caps
@@ -618,7 +798,7 @@ async fn apply_global_effect(
                 .collect();
             let device_reversed: Vec<bool> = wireless
                 .iter()
-                .map(|d| direction::is_reverse(resolve_direction(&d.device_id)))
+                .map(|d| resolve_reverse(&d.device_id))
                 .collect();
             let device_seg_counts: Vec<usize> = wireless
                 .iter()
@@ -654,7 +834,66 @@ async fn apply_global_effect(
                 ipc_send_delay().await;
             }
         }
-        RgbMode::RainbowMorph | RgbMode::Breathing | RgbMode::ColorCycle => {
+        RgbMode::TailChasing => {
+            // Same "one virtual strip across every device" idea as
+            // Rainbow's wave, but relayed device-by-device instead of
+            // blended into one continuous gradient — see
+            // `meteor_relay_across_devices`.
+            let led_counts: Vec<usize> = wireless
+                .iter()
+                .map(|d| {
+                    caps.iter()
+                        .find(|c| c.device_id == d.device_id)
+                        .map(|c| c.zones.iter().map(|z| z.led_count as usize).sum())
+                        .unwrap_or(0)
+                })
+                .collect();
+            let device_reversed: Vec<bool> = wireless.iter().map(|d| resolve_reverse(&d.device_id)).collect();
+            let device_seg_counts: Vec<usize> = wireless
+                .iter()
+                .map(|d| device_segments.get(&d.device_id).copied().unwrap_or(1))
+                .collect();
+            let device_circular: Vec<bool> = wireless.iter().map(|d| resolve_circular(&d.device_id)).collect();
+            let relay_frames = meteor_relay_across_devices(
+                &led_counts,
+                frame_count,
+                pause_frames,
+                color,
+                meteor_tail,
+                false,
+                &device_reversed,
+                &device_seg_counts,
+                &device_circular,
+                brightness_factor,
+            );
+            for (device, frames) in wireless.iter().zip(relay_frames.into_iter()) {
+                if frames.is_empty() {
+                    failed += 1;
+                    continue;
+                }
+                let request = IpcRequest::SetRgbFrames {
+                    device_id: device.device_id.clone(),
+                    frames: frames.clone(),
+                    interval_ms,
+                };
+                match ctx.client.call_unit(request).await {
+                    Ok(()) => {
+                        ctx.record_frames(&device.device_id, frames, interval_ms, mode);
+                        ok += 1;
+                    }
+                    Err(_) => failed += 1,
+                }
+                ipc_send_delay().await;
+            }
+        }
+        RgbMode::RainbowMorph
+        | RgbMode::Breathing
+        | RgbMode::ColorCycle
+        | RgbMode::Meteor
+        | RgbMode::MeteorShower
+        | RgbMode::Runway => {
+            let mut valid_devices: Vec<&DeviceInfo> = Vec::new();
+            let mut led_counts: Vec<usize> = Vec::new();
             for device in &wireless {
                 let led_count: usize = caps
                     .iter()
@@ -665,18 +904,78 @@ async fn apply_global_effect(
                     failed += 1;
                     continue;
                 }
-                let frames = match mode {
+                valid_devices.push(device);
+                led_counts.push(led_count);
+            }
+
+            // With "Sincronizar Efeito" on, each device's own turn plays
+            // with no pause of its own — the single pause (`pause_frames`)
+            // happens once, after the whole relay, via
+            // `stagger_across_devices` below.
+            let own_pause = if sync_devices { 0 } else { pause_frames };
+            let own_turns: Vec<Vec<Vec<[u8; 3]>>> = valid_devices
+                .iter()
+                .zip(led_counts.iter())
+                .map(|(device, &led_count)| match mode {
                     RgbMode::RainbowMorph => rainbow_morph_frames(led_count, frame_count, brightness_factor),
                     RgbMode::ColorCycle => custom_gradient_wave_frames(
                         led_count,
                         frame_count,
                         &gradient_colors,
-                        direction::is_reverse(resolve_direction(&device.device_id)),
+                        resolve_reverse(&device.device_id),
                         device_segments.get(&device.device_id).copied().unwrap_or(1),
                         brightness_factor,
                     ),
+                    RgbMode::Meteor => meteor_frames(
+                        led_count,
+                        frame_count,
+                        own_pause,
+                        color,
+                        meteor_tail,
+                        false,
+                        resolve_reverse(&device.device_id),
+                        device_segments.get(&device.device_id).copied().unwrap_or(1),
+                        resolve_circular(&device.device_id),
+                        brightness_factor,
+                    ),
+                    // Only one swatch (`color_row`) is shown for this mode —
+                    // it's the tail here, since the head cycles the hue
+                    // wheel on its own (see `meteor_tail_row`'s visibility).
+                    RgbMode::MeteorShower => meteor_frames(
+                        led_count,
+                        frame_count,
+                        own_pause,
+                        color,
+                        color,
+                        true,
+                        resolve_reverse(&device.device_id),
+                        device_segments.get(&device.device_id).copied().unwrap_or(1),
+                        resolve_circular(&device.device_id),
+                        brightness_factor,
+                    ),
+                    RgbMode::Runway => meteor_chase_frames(
+                        led_count,
+                        frame_count,
+                        own_pause,
+                        color,
+                        meteor_tail,
+                        false,
+                        resolve_reverse(&device.device_id),
+                        device_segments.get(&device.device_id).copied().unwrap_or(1),
+                        resolve_circular(&device.device_id),
+                        brightness_factor,
+                    ),
                     _ => breathing_frames(led_count, frame_count, color, brightness_factor),
-                };
+                })
+                .collect();
+
+            let per_device_frames = if sync_devices {
+                stagger_across_devices(&own_turns, &led_counts, pause_frames, meteor_tail)
+            } else {
+                own_turns
+            };
+
+            for (device, frames) in valid_devices.iter().zip(per_device_frames.into_iter()) {
                 let request = IpcRequest::SetRgbFrames {
                     device_id: device.device_id.clone(),
                     frames: frames.clone(),

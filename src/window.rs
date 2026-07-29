@@ -7,12 +7,13 @@
 use crate::app_state::{new_shared_state, start_polling};
 use crate::context::Ctx;
 use crate::ipc_client::IpcClient;
-use crate::pages::{fan_curve, global_effects, lcd_content, preferences, rgb_editor, wireless_pairing};
+use crate::pages::{fan_curve, global_effects, lcd_content, preferences, profiles, rgb_editor, wireless_pairing};
 use adw::prelude::*;
 use gtk::glib;
 use lianli_shared::device_id::DeviceFamily;
 use lianli_shared::ipc::{DeviceInfo, TelemetrySnapshot};
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 pub fn build_ui(app: &adw::Application) {
@@ -54,8 +55,11 @@ pub fn build_ui(app: &adw::Application) {
     sync_button.set_tooltip_text(Some(crate::i18n::t(lang, "sidebar.global_effects")));
     let wireless_button = gtk::Button::from_icon_name("network-wireless-symbolic");
     wireless_button.set_tooltip_text(Some(crate::i18n::t(lang, "sidebar.wireless_pairing")));
+    let profiles_button = gtk::Button::from_icon_name("view-list-bullet-symbolic");
+    profiles_button.set_tooltip_text(Some(crate::i18n::t(lang, "sidebar.profiles")));
     sidebar_header.pack_end(&sync_button);
     sidebar_header.pack_end(&wireless_button);
+    sidebar_header.pack_end(&profiles_button);
     sidebar_header.pack_end(&refresh_button);
     let sidebar_title = gtk::Label::builder()
         .label(crate::i18n::t(lang, "sidebar.title"))
@@ -110,8 +114,8 @@ pub fn build_ui(app: &adw::Application) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("LianLiGTK")
-        .default_width(980)
-        .default_height(640)
+        .default_width(app_prefs.window_width)
+        .default_height(app_prefs.window_height)
         .content(&toast_overlay)
         .build();
 
@@ -126,6 +130,7 @@ pub fn build_ui(app: &adw::Application) {
         app_prefs: Rc::new(RefCell::new(app_prefs)),
         last_effect: Rc::new(RefCell::new(crate::last_effect::load())),
         editor_snapshots: Rc::new(RefCell::new(crate::editor_snapshots::load())),
+        segment_anim_gen: Rc::new(RefCell::new(HashMap::new())),
     });
 
     {
@@ -135,14 +140,21 @@ pub fn build_ui(app: &adw::Application) {
         });
     }
 
+    crate::identify::spawn_frame_heartbeat(&ctx);
+
     // Closing just hides the window; the tray (or relaunching) brings it
     // back or quits for real.
     {
         let window = window.clone();
         let ctx = ctx.clone();
         window.connect_close_request(move |window| {
+            // `default_width`/`default_height` track the current
+            // non-maximized size live in GTK4 — not just the size passed to
+            // the builder — so this captures whatever the user last resized
+            // to, maximized or not (maximized just reports the size from
+            // before maximizing, which is what we want to restore anyway).
+            ctx.set_window_size(window.default_width(), window.default_height());
             window.set_visible(false);
-            ctx.toast(ctx.t("window.minimized_to_tray"));
             glib::Propagation::Stop
         });
     }
@@ -151,6 +163,7 @@ pub fn build_ui(app: &adw::Application) {
     crate::tray::spawn(tray_tx, ctx.lang());
     {
         let window = window.clone();
+        let ctx = ctx.clone();
         glib::spawn_future_local(async move {
             while let Ok(event) = tray_rx.recv().await {
                 match event {
@@ -161,7 +174,10 @@ pub fn build_ui(app: &adw::Application) {
                             window.present();
                         }
                     }
-                    crate::tray::TrayEvent::Quit => std::process::exit(0),
+                    crate::tray::TrayEvent::Quit => {
+                        ctx.set_window_size(window.default_width(), window.default_height());
+                        std::process::exit(0);
+                    }
                 }
             }
         });
@@ -188,6 +204,14 @@ pub fn build_ui(app: &adw::Application) {
         wireless_button.connect_clicked(move |_| {
             let ctx = ctx.clone();
             ctx.push_singleton("wireless-pairing", || wireless_pairing::page(&ctx));
+        });
+    }
+
+    {
+        let ctx = ctx.clone();
+        profiles_button.connect_clicked(move |_| {
+            let ctx = ctx.clone();
+            ctx.push_singleton("profiles", || profiles::page(&ctx));
         });
     }
 
@@ -318,7 +342,13 @@ pub fn build_ui(app: &adw::Application) {
 
     {
         let on_update = on_update.clone();
-        start_polling(ctx.client.clone(), state, move || on_update());
+        let ctx = ctx.clone();
+        start_polling(ctx.client.clone(), state, move || on_update(), move |device_id| {
+            let ctx = ctx.clone();
+            glib::spawn_future_local(async move {
+                crate::identify::reapply_last_effect(&ctx, &device_id).await;
+            });
+        });
     }
 
     let start_hidden = std::env::args().any(|arg| arg == "--start-hidden");

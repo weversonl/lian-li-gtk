@@ -2,7 +2,6 @@
 //! and pushes changes back via `SetLcdMedia`.
 
 use crate::context::Ctx;
-use crate::widgets::segmented_control;
 use adw::prelude::*;
 use gtk::glib;
 use lianli_shared::config::AppConfig;
@@ -97,14 +96,16 @@ fn build_editor(
         .iter()
         .position(|t| *t == lcd_config.borrow().media_type)
         .unwrap_or(0);
-    let type_row = adw::ActionRow::builder().title(ctx.t("lcd.media_type")).build();
+    let type_model = gtk::StringList::new(&type_names);
+    let type_row = adw::ComboRow::builder().title(ctx.t("lcd.media_type")).model(&type_model).build();
+    type_row.set_selected(selected_index as u32);
     {
         let lcd_config = lcd_config.clone();
-        type_row.add_suffix(&segmented_control::build(&type_names, selected_index, move |i| {
-            if let Some(t) = MEDIA_TYPES.get(i) {
+        type_row.connect_selected_notify(move |row| {
+            if let Some(t) = MEDIA_TYPES.get(row.selected() as usize) {
                 lcd_config.borrow_mut().media_type = *t;
             }
-        }));
+        });
     }
     group.add(&type_row);
 
