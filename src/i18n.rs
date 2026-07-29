@@ -91,8 +91,6 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         // ---- Preferences ----
         (Lang::En, "prefs.general") => "General",
         (Lang::PtBr, "prefs.general") => "Geral",
-        (Lang::En, "prefs.saved_presets") => "Saved Presets",
-        (Lang::PtBr, "prefs.saved_presets") => "Presets Salvos",
         (Lang::En, "prefs.daemon_status") => "Daemon Status",
         (Lang::PtBr, "prefs.daemon_status") => "Status do Daemon",
         (Lang::En, "prefs.running") => "● Running",
@@ -107,16 +105,6 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         (Lang::PtBr, "prefs.language_toast") => "Idioma alterado",
         (Lang::En, "prefs.restart_now") => "Restart",
         (Lang::PtBr, "prefs.restart_now") => "Reiniciar",
-        (Lang::En, "prefs.presets_banner") => "Deleting a preset removes it from this list only — it does not reset the device.",
-        (Lang::PtBr, "prefs.presets_banner") => "Apagar um preset só remove ele desta lista — não reseta o dispositivo.",
-        (Lang::En, "prefs.no_presets") => "No saved presets",
-        (Lang::PtBr, "prefs.no_presets") => "Nenhum preset salvo",
-        (Lang::En, "prefs.delete_preset_body") => "This only removes it from the list — the device keeps running whatever it's currently doing.",
-        (Lang::PtBr, "prefs.delete_preset_body") => "Isso só remove da lista — o dispositivo continua rodando o que já estava fazendo.",
-        (Lang::En, "prefs.cancel") => "Cancel",
-        (Lang::PtBr, "prefs.cancel") => "Cancelar",
-        (Lang::En, "prefs.delete") => "Delete",
-        (Lang::PtBr, "prefs.delete") => "Apagar",
         (Lang::En, "prefs.daemon_group") => "Daemon",
         (Lang::PtBr, "prefs.daemon_group") => "Daemon",
         (Lang::En, "prefs.checking") => "Checking…",
@@ -127,22 +115,6 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         (Lang::PtBr, "prefs.openrgb_enabled_not_bound") => "ativado, ainda não vinculado",
         (Lang::En, "prefs.openrgb_disabled") => "disabled",
         (Lang::PtBr, "prefs.openrgb_disabled") => "desativado",
-        (Lang::En, "prefs.saved_rgb_presets") => "Saved RGB Presets",
-        (Lang::PtBr, "prefs.saved_rgb_presets") => "Presets de RGB Salvos",
-        (Lang::En, "prefs.presets_banner_subtitle") => {
-            "The hardware keeps running the last effect that was applied until you send a new one."
-        }
-        (Lang::PtBr, "prefs.presets_banner_subtitle") => {
-            "O hardware continua rodando o último efeito aplicado até você enviar um novo."
-        }
-        (Lang::En, "prefs.failed_load_presets") => "Failed to load presets",
-        (Lang::PtBr, "prefs.failed_load_presets") => "Falha ao carregar presets",
-        (Lang::En, "prefs.delete_preset_q") => "Delete preset",
-        (Lang::PtBr, "prefs.delete_preset_q") => "Apagar o preset",
-        (Lang::En, "prefs.preset_deleted") => "Preset deleted",
-        (Lang::PtBr, "prefs.preset_deleted") => "Preset apagado",
-        (Lang::En, "prefs.failed_delete_preset") => "Failed to delete preset",
-        (Lang::PtBr, "prefs.failed_delete_preset") => "Falha ao apagar preset",
         (Lang::En, "prefs.lang_en") => "English",
         (Lang::PtBr, "prefs.lang_en") => "English",
         (Lang::En, "prefs.lang_pt") => "Português",

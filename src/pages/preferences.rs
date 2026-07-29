@@ -1,16 +1,11 @@
-//! Preferences window: General (daemon status, OpenRGB port, language) and
-//! Saved Presets (delete-only management of `RgbPreset`s).
-//!
-//! Deleting a preset only sends `DeleteRgbPreset`, a catalog-only operation
-//! — it never touches `AppConfig` or sends a device command, so it doesn't
-//! reset whatever effect is currently running on the hardware.
+//! Preferences window: daemon status, OpenRGB port, language, autostart,
+//! default device.
 
 use crate::app_prefs::Lang;
 use crate::context::Ctx;
 use adw::prelude::*;
 use gtk::glib;
 use lianli_shared::ipc::{IpcRequest, TelemetrySnapshot};
-use lianli_shared::rgb::RgbPreset;
 use std::rc::Rc;
 
 pub fn open(ctx: &Rc<Ctx>, parent: &impl IsA<gtk::Window>) {
@@ -22,10 +17,6 @@ pub fn open(ctx: &Rc<Ctx>, parent: &impl IsA<gtk::Window>) {
         .build();
 
     window.add(&general_page(ctx));
-    let (presets_page, refresh_presets) = presets_page(ctx);
-    window.add(&presets_page);
-
-    refresh_presets();
     window.present();
 }
 
@@ -140,127 +131,3 @@ fn general_page(ctx: &Rc<Ctx>) -> adw::PreferencesPage {
     page
 }
 
-fn presets_page(ctx: &Rc<Ctx>) -> (adw::PreferencesPage, impl Fn() + 'static) {
-    let page = adw::PreferencesPage::builder()
-        .title(ctx.t("prefs.saved_presets"))
-        .icon_name("starred-symbolic")
-        .build();
-
-    let group = adw::PreferencesGroup::builder().title(ctx.t("prefs.saved_rgb_presets")).build();
-    let list_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    group.add(&list_box);
-    page.add(&group);
-
-    let note_group = adw::PreferencesGroup::new();
-    let note_row = adw::ActionRow::builder()
-        .title(ctx.t("prefs.presets_banner"))
-        .subtitle(ctx.t("prefs.presets_banner_subtitle"))
-        .build();
-    note_row.add_prefix(&gtk::Image::from_icon_name("dialog-information-symbolic"));
-    note_group.add(&note_row);
-    page.add(&note_group);
-
-    let ctx_for_refresh = ctx.clone();
-    let list_box_for_refresh = list_box.clone();
-    let refresh = move || {
-        let ctx = ctx_for_refresh.clone();
-        let list_box = list_box_for_refresh.clone();
-        glib::spawn_future_local(async move {
-            match ctx.client.call::<Vec<RgbPreset>>(IpcRequest::ListRgbPresets).await {
-                Ok(presets) => populate_presets(&list_box, &ctx, presets),
-                Err(e) => ctx.toast(&format!("{}: {e}", ctx.t("prefs.failed_load_presets"))),
-            }
-        });
-    };
-
-    (page, refresh)
-}
-
-fn populate_presets(list_box: &gtk::Box, ctx: &Rc<Ctx>, presets: Vec<RgbPreset>) {
-    while let Some(child) = list_box.first_child() {
-        list_box.remove(&child);
-    }
-
-    if presets.is_empty() {
-        list_box.append(&adw::ActionRow::builder().title(ctx.t("prefs.no_presets")).build());
-        return;
-    }
-
-    for preset in presets {
-        let row = adw::ActionRow::builder()
-            .title(preset.name.clone())
-            .subtitle(preset.device_id.clone())
-            .build();
-
-        let delete_button = gtk::Button::builder()
-            .icon_name("user-trash-symbolic")
-            .valign(gtk::Align::Center)
-            .css_classes(["flat", "circular"])
-            .build();
-
-        let ctx_cb = ctx.clone();
-        let list_box_cb = list_box.clone();
-        let name = preset.name.clone();
-        let device_id = preset.device_id.clone();
-        delete_button.connect_clicked(move |button| {
-            let root = button.root();
-            let Some(window) = root.and_then(|r| r.downcast::<gtk::Window>().ok()) else {
-                return;
-            };
-            confirm_delete(&window, &ctx_cb, &list_box_cb, name.clone(), device_id.clone());
-        });
-
-        row.add_suffix(&delete_button);
-        list_box.append(&row);
-    }
-}
-
-fn confirm_delete(
-    parent: &gtk::Window,
-    ctx: &Rc<Ctx>,
-    list_box: &gtk::Box,
-    name: String,
-    device_id: String,
-) {
-    let dialog = adw::AlertDialog::builder()
-        .heading(format!("{} “{name}”?", ctx.t("prefs.delete_preset_q")))
-        .body(ctx.t("prefs.delete_preset_body"))
-        .build();
-    dialog.add_response("cancel", ctx.t("prefs.cancel"));
-    dialog.add_response("delete", ctx.t("prefs.delete"));
-    dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
-    dialog.set_default_response(Some("cancel"));
-    dialog.set_close_response("cancel");
-
-    let ctx = ctx.clone();
-    let list_box = list_box.clone();
-    dialog.connect_response(None, move |dialog, response| {
-        if response != "delete" {
-            return;
-        }
-        let ctx = ctx.clone();
-        let list_box = list_box.clone();
-        let name = name.clone();
-        let device_id = device_id.clone();
-        dialog.close();
-        glib::spawn_future_local(async move {
-            let request = IpcRequest::DeleteRgbPreset {
-                name: name.clone(),
-                device_id: device_id.clone(),
-            };
-            match ctx.client.call_unit(request).await {
-                Ok(()) => {
-                    ctx.toast(&format!("{} “{name}”", ctx.t("prefs.preset_deleted")));
-                    if let Ok(presets) =
-                        ctx.client.call::<Vec<RgbPreset>>(IpcRequest::ListRgbPresets).await
-                    {
-                        populate_presets(&list_box, &ctx, presets);
-                    }
-                }
-                Err(e) => ctx.toast(&format!("{}: {e}", ctx.t("prefs.failed_delete_preset"))),
-            }
-        });
-    });
-
-    dialog.present(Some(parent));
-}
