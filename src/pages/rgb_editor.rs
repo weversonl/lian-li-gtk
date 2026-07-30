@@ -19,9 +19,9 @@ use crate::context::Ctx;
 use crate::direction::{direction_label, ALL_DIRECTIONS};
 use crate::effects::{
     apply_edge_frame, apply_edge_strips_frame, breathing_frames, color_count_for_mode, custom_gradient_wave_frames,
-    fps_to_interval_ms, frame_count_for, meteor_chase_frames, meteor_frames, meteor_pause_frames, mode_uses_color,
-    percent_to_brightness4, percent_to_cycle_ms, percent_to_speed4, rainbow_frames, rainbow_morph_frames,
-    scale_color,
+    fps_to_interval_ms, frame_count_for, meteor_band_frames, meteor_chase_frames, meteor_frames, meteor_pause_frames,
+    mode_uses_color, percent_to_brightness4, percent_to_cycle_ms, percent_to_speed4, rainbow_frames,
+    rainbow_morph_frames, scale_color,
 };
 use adw::prelude::*;
 use gtk::glib;
@@ -43,20 +43,22 @@ const WIRELESS_ANIMATED_MODES: [RgbMode; 7] = [
 ];
 
 /// `MeteorShower` and `Runway` are repurposed here for wireless devices,
-/// same trick as `ColorCycle` → "Gradient Wave": `Meteor` treats the whole
-/// buffer as one continuous strip, merged across physical strip boundaries
-/// (`meteor_frames`) — a single meteor, not one per strip. `MeteorShower` is
-/// its rainbow-headed variant. `Runway` is the opposite: a strip-by-strip
-/// relay (`meteor_chase_frames`) — one physical strip at a time, in
-/// sequence, restarting from the first once the last finishes. A real wired
-/// device with genuine native support for any of these three is unaffected.
+/// same trick as `ColorCycle` → "Gradient Wave": on a multi-fan hub,
+/// `Meteor` renders a physically-accurate band crossing each fan
+/// (`meteor_band_frames`); on any other device (e.g. a Strimer cable) it
+/// merges every physical strip into one continuous meteor (`meteor_frames`)
+/// instead, same as before. `MeteorShower` is the latter's rainbow-headed
+/// variant. `Runway` keeps the older every-strip-in-sync rendering
+/// (`meteor_frames`) always, even on a fan hub, for whoever prefers that
+/// look over the band-crossing default. A real wired device with genuine
+/// native support for any of these three is unaffected.
 fn effect_mode_label(mode: RgbMode, is_wireless: bool) -> &'static str {
     if is_wireless && mode == RgbMode::ColorCycle {
         "Gradient Wave"
     } else if is_wireless && mode == RgbMode::MeteorShower {
         "Meteor (Rainbow)"
     } else if is_wireless && mode == RgbMode::Runway {
-        "Meteor (Split)"
+        "Meteor (Synced)"
     } else {
         mode.display_name()
     }
@@ -1316,6 +1318,20 @@ fn build_editor(
     }
 }
 
+fn has_fan(ctx: &Rc<Ctx>, device_id: &str) -> bool {
+    ctx.state.borrow().devices.iter().any(|d| d.device_id == device_id && d.has_fan)
+}
+
+/// Real per-fan zone sizes for `device_id`, truncated to `strip_count` — see
+/// `effects::meteor_band_frames`'s doc comment on why a hub's own
+/// `caps.zones` can include unpopulated ports that must be excluded.
+fn fan_zone_led_counts(device_id: &str, caps: &[RgbDeviceCapabilities], strip_count: usize) -> Vec<usize> {
+    caps.iter()
+        .find(|c| c.device_id == device_id)
+        .map(|c| c.zones.iter().take(strip_count).map(|z| z.led_count as usize).collect())
+        .unwrap_or_default()
+}
+
 async fn apply_wireless_animation(
     ctx: &Rc<Ctx>,
     device_id: &str,
@@ -1366,6 +1382,14 @@ async fn apply_wireless_animation(
         RgbMode::RainbowMorph => rainbow_morph_frames(led_count, frame_count, brightness),
         RgbMode::Breathing => breathing_frames(led_count, frame_count, colors[0], brightness),
         RgbMode::ColorCycle => custom_gradient_wave_frames(led_count, frame_count, &colors, reverse, strip_count, brightness),
+        RgbMode::Meteor if has_fan(ctx, device_id) => {
+            let zones = fan_zone_led_counts(device_id, &caps, strip_count);
+            let ring_offset_deg = ctx.rgb_prefs_for(device_id).ring_offset_deg as f32;
+            meteor_band_frames(
+                led_count, &zones, ring_offset_deg, frame_count, pause_frames, colors[0], colors[1], reverse,
+                brightness,
+            )
+        }
         RgbMode::Meteor => meteor_frames(
             led_count, frame_count, pause_frames, colors[0], colors[1], false, reverse, strip_count, meteor_circular,
             brightness,
@@ -1374,7 +1398,7 @@ async fn apply_wireless_animation(
             led_count, frame_count, pause_frames, colors[0], colors[0], true, reverse, strip_count, meteor_circular,
             brightness,
         ),
-        RgbMode::Runway => meteor_chase_frames(
+        RgbMode::Runway => meteor_frames(
             led_count, frame_count, pause_frames, colors[0], colors[1], false, reverse, strip_count, meteor_circular,
             brightness,
         ),

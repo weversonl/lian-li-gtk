@@ -342,13 +342,15 @@ pub fn meteor_chase_frames(
 
 /// Where LED `local_index` (0-based within its own `led_count`-LED ring)
 /// sits on the fan assembly's horizontal axis, as a fraction of one fan's
-/// width (`0.0` = left edge, `1.0` = right edge) — assumes the ring starts
-/// at the top (`local_index == 0`) and runs clockwise, which is the usual
-/// wiring order for these fans. LEDs on the top and bottom half of the ring
-/// that sit at the same horizontal position get (almost) the same value,
-/// since `sin` is symmetric across the vertical axis.
-fn ring_horizontal_fraction(local_index: usize, led_count: usize) -> f32 {
-    let angle = std::f32::consts::TAU * local_index as f32 / led_count.max(1) as f32;
+/// width (`0.0` = left edge, `1.0` = right edge). `offset_deg` is the real
+/// physical clock position of `local_index == 0` (0 = 12 o'clock, -90 = 9
+/// o'clock, ...) — fans of the identical model can be screwed into a hub at
+/// a different rotation, so this isn't a fixed assumption, it's per-device
+/// (see `DeviceRgbPrefs::ring_offset_deg`). LEDs on the top and bottom half
+/// of the ring that sit at the same horizontal position get (almost) the
+/// same value, since `sin` is symmetric across the vertical axis.
+fn ring_horizontal_fraction(local_index: usize, led_count: usize, offset_deg: f32) -> f32 {
+    let angle = std::f32::consts::TAU * local_index as f32 / led_count.max(1) as f32 + offset_deg.to_radians();
     (angle.sin() + 1.0) / 2.0
 }
 
@@ -356,8 +358,9 @@ fn ring_horizontal_fraction(local_index: usize, led_count: usize) -> f32 {
 /// fan-widths (`0.0` = left edge of the first fan, `zone_led_counts.len()`
 /// = right edge of the last) — `None` for LEDs past the last real fan (a
 /// hub's unpopulated extra zone, e.g. a 4-port hub with only 3 fans wired
-/// in, has no physical LEDs there at all).
-fn band_positions(total_led_count: usize, zone_led_counts: &[usize]) -> Vec<Option<f32>> {
+/// in, has no physical LEDs there at all). `ring_offset_deg` calibrates the
+/// physical mount rotation for this device — see `ring_horizontal_fraction`.
+fn band_positions(total_led_count: usize, zone_led_counts: &[usize], ring_offset_deg: f32) -> Vec<Option<f32>> {
     let mut positions = vec![None; total_led_count];
     let mut offset = 0usize;
     for (fan_i, &n) in zone_led_counts.iter().enumerate() {
@@ -365,7 +368,7 @@ fn band_positions(total_led_count: usize, zone_led_counts: &[usize]) -> Vec<Opti
             if offset + j >= total_led_count {
                 break;
             }
-            positions[offset + j] = Some(fan_i as f32 + ring_horizontal_fraction(j, n));
+            positions[offset + j] = Some(fan_i as f32 + ring_horizontal_fraction(j, n, ring_offset_deg));
         }
         offset += n;
     }
@@ -403,6 +406,7 @@ const BAND_BACK_WIDTH: f32 = 0.85;
 pub fn meteor_band_frames(
     total_led_count: usize,
     zone_led_counts: &[usize],
+    ring_offset_deg: f32,
     frame_count: usize,
     pause_frames: usize,
     head_color: [u8; 3],
@@ -410,7 +414,7 @@ pub fn meteor_band_frames(
     reverse: bool,
     brightness: f32,
 ) -> Vec<Vec<[u8; 3]>> {
-    let positions = band_positions(total_led_count, zone_led_counts);
+    let positions = band_positions(total_led_count, zone_led_counts, ring_offset_deg);
     let num_fans = zone_led_counts.len().max(1) as f32;
     let head = scale_color(head_color, brightness as f64);
     let background = scale_color(background_color, brightness as f64);
@@ -569,6 +573,7 @@ pub fn meteor_relay_across_devices(
     device_strip_counts: &[usize],
     device_circular: &[bool],
     device_chase: &[bool],
+    device_ring_offset_deg: &[f32],
     brightness: f32,
 ) -> Vec<Vec<Vec<[u8; 3]>>> {
     let n = device_led_counts.len();
@@ -581,9 +586,11 @@ pub fn meteor_relay_across_devices(
             let circular = device_circular.get(i).copied().unwrap_or(false);
             if device_chase.get(i).copied().unwrap_or(false) {
                 let zones = device_zone_led_counts.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
+                let ring_offset_deg = device_ring_offset_deg.get(i).copied().unwrap_or(0.0);
                 meteor_band_frames(
                     device_led_counts[i],
                     zones,
+                    ring_offset_deg,
                     frame_count_per_device,
                     0,
                     head_color,

@@ -321,6 +321,8 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         (Lang::PtBr, "ge.no_devices") => "Nenhum dispositivo RGB conectado",
         (Lang::En, "ge.led_strips") => "LED Strips",
         (Lang::PtBr, "ge.led_strips") => "Faixas de LED",
+        (Lang::En, "ge.ring_offset") => "Ring Rotation (°)",
+        (Lang::PtBr, "ge.ring_offset") => "Rotação do Anel (°)",
         (Lang::En, "ge.failed_load_caps") => "Failed to load RGB capabilities",
         (Lang::PtBr, "ge.failed_load_caps") => "Falha ao carregar capacidades de RGB",
         (Lang::En, "ge.applied_to") => "applied to",

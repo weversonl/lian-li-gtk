@@ -11,7 +11,7 @@
 use crate::context::Ctx;
 use crate::direction::{self, wave_direction_label, WAVE_DIRECTIONS};
 use crate::effects::{
-    breathing_frames, custom_gradient_wave_frames, fps_to_interval_ms, frame_count_for, meteor_chase_frames,
+    breathing_frames, custom_gradient_wave_frames, fps_to_interval_ms, frame_count_for, meteor_band_frames,
     meteor_frames, meteor_pause_frames, meteor_relay_across_devices, mode_uses_color, percent_to_brightness4,
     percent_to_cycle_ms, percent_to_speed4, rainbow_morph_frames, rainbow_wave_frames, scale_color,
     stagger_across_devices,
@@ -41,19 +41,23 @@ const MODES: [RgbMode; 9] = [
 /// skipped for all four (see `apply_global_effect`), since a wired device
 /// with genuine native support would otherwise get its real,
 /// differently-behaving mode under these misleading labels.
-/// `Meteor`/`MeteorShower` merge every physical strip into one continuous
-/// meteor (`meteor_frames`); `Runway` is a strip-by-strip relay within one
-/// device (`meteor_chase_frames`); `TailChasing` is that same relay idea
-/// promoted to whole *devices*, in the device order set below
-/// (`meteor_relay_across_devices`) — this one only exists here, since a
-/// single-device page has no other devices to relay across.
+/// `Meteor`/`MeteorShower` render a physically-accurate band crossing each
+/// fan of a multi-fan hub (`meteor_band_frames`) — or, for non-fan devices
+/// like a Strimer cable, merge every physical strip into one continuous
+/// meteor (`meteor_frames`), same as before. `Runway` keeps that older
+/// every-strip-in-sync rendering (`meteor_frames`) always, even on a fan
+/// hub, for whoever preferred that look over the newer band-crossing
+/// default. `TailChasing` promotes the band-crossing idea to whole
+/// *devices*, in the device order set below (`meteor_relay_across_devices`)
+/// — this one only exists here, since a single-device page has no other
+/// devices to relay across.
 fn mode_label(mode: RgbMode) -> &'static str {
     if mode == RgbMode::ColorCycle {
         "Gradient Wave"
     } else if mode == RgbMode::MeteorShower {
         "Meteor (Rainbow)"
     } else if mode == RgbMode::Runway {
-        "Meteor (Split)"
+        "Meteor (Synced)"
     } else if mode == RgbMode::TailChasing {
         "Meteor (Relay)"
     } else {
@@ -643,6 +647,28 @@ fn render_device_order(
         merge_row.add_suffix(&merge_spin);
         row.add_row(&merge_row);
 
+        if device.has_fan {
+            // Fans of the identical model can be screwed into a hub at a
+            // different physical rotation — this calibrates where local LED
+            // index 0 really sits (0 = 12 o'clock), so the Meteor
+            // band-crossing effect reads its horizontal position correctly.
+            // Only meaningful for fan rings, not cables like a Strimer.
+            let ring_row = adw::ActionRow::builder().title(ctx.t("ge.ring_offset")).build();
+            let current_offset = saved_prefs.map(|p| p.ring_offset_deg).unwrap_or(0.0);
+            let ring_adj = gtk::Adjustment::new(current_offset, -180.0, 180.0, 15.0, 15.0, 0.0);
+            let ring_spin = gtk::SpinButton::new(Some(&ring_adj), 1.0, 0);
+            ring_spin.set_valign(gtk::Align::Center);
+            {
+                let device_id = device.device_id.clone();
+                let ctx = ctx.clone();
+                ring_adj.connect_value_changed(move |adj| {
+                    ctx.set_ring_offset_deg(&device_id, adj.value());
+                });
+            }
+            ring_row.add_suffix(&ring_spin);
+            row.add_row(&ring_row);
+        }
+
         list_box.append(&row);
     }
 }
@@ -692,6 +718,9 @@ async fn apply_global_effect(
         |device_id: &str| -> bool { direction::effective_reverse(resolve_direction(device_id), ctx.rgb_prefs_for(device_id).invert_direction) };
     // Per-device Meteor ring-vs-strip topology, same source as above.
     let resolve_circular = |device_id: &str| -> bool { ctx.rgb_prefs_for(device_id).meteor_circular };
+    // Per-device fan-ring mount rotation, same source as above — see
+    // `DeviceRgbPrefs::ring_offset_deg`.
+    let resolve_ring_offset = |device_id: &str| -> f32 { ctx.rgb_prefs_for(device_id).ring_offset_deg as f32 };
 
     let wireless: Vec<&DeviceInfo> = devices.iter().filter(|d| d.device_id.starts_with("wireless:")).collect();
     let wired: Vec<&DeviceInfo> = devices.iter().filter(|d| !d.device_id.starts_with("wireless:")).collect();
@@ -879,6 +908,8 @@ async fn apply_global_effect(
                         .unwrap_or_default()
                 })
                 .collect();
+            let device_ring_offset_deg: Vec<f32> =
+                wireless.iter().map(|d| resolve_ring_offset(&d.device_id)).collect();
             let relay_frames = meteor_relay_across_devices(
                 &led_counts,
                 &device_zone_led_counts,
@@ -891,6 +922,7 @@ async fn apply_global_effect(
                 &device_seg_counts,
                 &device_circular,
                 &device_chase,
+                &device_ring_offset_deg,
                 brightness_factor,
             );
             for (device, frames) in wireless.iter().zip(relay_frames.into_iter()) {
@@ -953,18 +985,40 @@ async fn apply_global_effect(
                         device_segments.get(&device.device_id).copied().unwrap_or(1),
                         brightness_factor,
                     ),
-                    RgbMode::Meteor => meteor_frames(
-                        led_count,
-                        frame_count,
-                        own_pause,
-                        color,
-                        meteor_tail,
-                        false,
-                        resolve_reverse(&device.device_id),
-                        device_segments.get(&device.device_id).copied().unwrap_or(1),
-                        resolve_circular(&device.device_id),
-                        brightness_factor,
-                    ),
+                    RgbMode::Meteor => {
+                        let strip_count = device_segments.get(&device.device_id).copied().unwrap_or(1);
+                        if device.has_fan {
+                            let zones: Vec<usize> = caps
+                                .iter()
+                                .find(|c| c.device_id == device.device_id)
+                                .map(|c| c.zones.iter().take(strip_count).map(|z| z.led_count as usize).collect())
+                                .unwrap_or_default();
+                            meteor_band_frames(
+                                led_count,
+                                &zones,
+                                resolve_ring_offset(&device.device_id),
+                                frame_count,
+                                own_pause,
+                                color,
+                                meteor_tail,
+                                resolve_reverse(&device.device_id),
+                                brightness_factor,
+                            )
+                        } else {
+                            meteor_frames(
+                                led_count,
+                                frame_count,
+                                own_pause,
+                                color,
+                                meteor_tail,
+                                false,
+                                resolve_reverse(&device.device_id),
+                                strip_count,
+                                resolve_circular(&device.device_id),
+                                brightness_factor,
+                            )
+                        }
+                    }
                     // Only one swatch (`color_row`) is shown for this mode —
                     // it's the tail here, since the head cycles the hue
                     // wheel on its own (see `meteor_tail_row`'s visibility).
@@ -980,7 +1034,7 @@ async fn apply_global_effect(
                         resolve_circular(&device.device_id),
                         brightness_factor,
                     ),
-                    RgbMode::Runway => meteor_chase_frames(
+                    RgbMode::Runway => meteor_frames(
                         led_count,
                         frame_count,
                         own_pause,

@@ -113,13 +113,24 @@ async fn reapply_last_effect_inner(ctx: &Rc<Ctx>, device_id: &str, notify_on_fai
 /// A cross-device "Sincronizar Efeito" relay (see
 /// `global_effects::stagger_across_devices`) has its phase baked into each
 /// device's own frame buffer — every device restarts at frame 0 of an
-/// identical-length loop, so as long as they all restart at (approximately)
-/// the same instant they stay in relay lockstep. That's why this fires every
-/// device's resend *concurrently* in one go, with no per-device settle
-/// delay or retry backoff (unlike `reapply_last_effect`, which is built for
-/// a just-reconnected single device and can afford to take its time) —
-/// staggering them here, even by a few hundred ms, would introduce a
-/// permanent phase drift between devices that never corrects itself.
+/// identical-length loop, so they need to restart at (approximately) the
+/// same instant to stay in relay lockstep. A few hundred ms of stagger
+/// between devices only costs a small, self-correcting phase skew each
+/// cycle (it never accumulates, since the next heartbeat resyncs from
+/// frame 0 again) — firing every device's resend truly concurrently instead
+/// hits the shared RF dongle with several large animation uploads at once,
+/// which was observed to collide with the once-a-second master-clock
+/// heartbeat (`fan_controller`) badly enough to cause real wireless
+/// disconnect/reconnect flicker and fans briefly stalling. Staggering is
+/// the safer trade. Confirmed live: with 4 wireless devices all running a
+/// heavy Meteor Relay animation (940 frames each), a merely-staggered
+/// (delay-then-fire, not delay-then-wait) concurrent resend still let
+/// transfers overlap on the shared RF dongle badly enough to cause real
+/// fan stalls and RGB flicker — a single-device animation alone was rock
+/// solid. Each `SetRgbFrames` IPC call only returns once the daemon has
+/// finished writing that device's whole chunked RF transfer, so awaiting
+/// them one at a time (not spawning them) is what actually guarantees no
+/// overlap, regardless of how long any single transfer takes.
 const HEARTBEAT_SECS: u64 = 20;
 
 pub fn spawn_frame_heartbeat(ctx: &Rc<Ctx>) {
@@ -146,15 +157,8 @@ pub fn spawn_frame_heartbeat(ctx: &Rc<Ctx>) {
                 if has_segments {
                     continue;
                 }
-                // Spawned rather than awaited in-line: all eligible devices'
-                // sends get issued back-to-back within this same tick,
-                // instead of one finishing (with its own IPC round-trip
-                // latency) before the next even starts.
-                let ctx = ctx.clone();
-                glib::spawn_future_local(async move {
-                    let request = IpcRequest::SetRgbFrames { device_id, frames, interval_ms };
-                    let _ = ctx.client.call_unit(request).await;
-                });
+                let request = IpcRequest::SetRgbFrames { device_id, frames, interval_ms };
+                let _ = ctx.client.call_unit(request).await;
             }
         }
     });

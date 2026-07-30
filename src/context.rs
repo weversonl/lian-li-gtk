@@ -221,10 +221,26 @@ impl Ctx {
         meteor_circular: bool,
     ) {
         let mut prefs = self.rgb_prefs.borrow_mut();
+        // Preserves `ring_offset_deg` — a calibration value set separately
+        // (see `set_ring_offset_deg`), not one of this function's callers'
+        // concern, so overwriting the whole struct here would silently
+        // reset it back to 0 every time direction/strip_count/etc change.
+        let ring_offset_deg = prefs.get(device_id).map(|p| p.ring_offset_deg).unwrap_or(0.0);
         prefs.insert(
             device_id.to_string(),
-            DeviceRgbPrefs { direction, strip_count, invert_direction, meteor_circular },
+            DeviceRgbPrefs { direction, strip_count, invert_direction, meteor_circular, ring_offset_deg },
         );
+        crate::device_rgb_prefs::save(&prefs);
+    }
+
+    /// Physical mount rotation calibration for a device's fan ring(s) — see
+    /// `DeviceRgbPrefs::ring_offset_deg`. Kept separate from `set_rgb_prefs`
+    /// since it's an advanced, rarely-touched setting.
+    pub fn set_ring_offset_deg(&self, device_id: &str, ring_offset_deg: f64) {
+        let mut prefs = self.rgb_prefs.borrow_mut();
+        let mut entry = prefs.get(device_id).copied().unwrap_or_default();
+        entry.ring_offset_deg = ring_offset_deg;
+        prefs.insert(device_id.to_string(), entry);
         crate::device_rgb_prefs::save(&prefs);
     }
 

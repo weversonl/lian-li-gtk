@@ -22,11 +22,24 @@ pub struct DeviceRgbPrefs {
     /// real physical ends (e.g. a Strimer cable) — see `meteor_frames`.
     #[serde(default)]
     pub meteor_circular: bool,
+    /// Physical mount rotation of this device's fan ring(s), in degrees,
+    /// where 0 means local LED index 0 sits at 12 o'clock (the common
+    /// default) — see `effects::band_positions`. Fans of the identical
+    /// model can still be screwed in at a different rotation per hub, so
+    /// this is calibrated per device rather than assumed from the model.
+    #[serde(default)]
+    pub ring_offset_deg: f64,
 }
 
 impl Default for DeviceRgbPrefs {
     fn default() -> Self {
-        Self { direction: RgbDirection::Up, strip_count: 1, invert_direction: false, meteor_circular: false }
+        Self {
+            direction: RgbDirection::Up,
+            strip_count: 1,
+            invert_direction: false,
+            meteor_circular: false,
+            ring_offset_deg: 0.0,
+        }
     }
 }
 
