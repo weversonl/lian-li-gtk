@@ -696,6 +696,17 @@ async fn apply_global_effect(
     let wireless: Vec<&DeviceInfo> = devices.iter().filter(|d| d.device_id.starts_with("wireless:")).collect();
     let wired: Vec<&DeviceInfo> = devices.iter().filter(|d| !d.device_id.starts_with("wireless:")).collect();
 
+    // Any stale `AppConfig.rgb` entry left over from an earlier Static
+    // apply must go before an animated mode starts — otherwise the
+    // daemon's own idle-watchdog auto-resync (see `rgb_persist`) keeps
+    // reapplying that old static color via RF over these frames whenever
+    // the device's firmware hiccups (the "flickers back to the old
+    // color" symptom this exists to prevent).
+    if mode != RgbMode::Static {
+        let ids: Vec<String> = wireless.iter().map(|d| d.device_id.clone()).collect();
+        crate::rgb_persist::clear_wireless_rgb_configs(ctx, &ids).await;
+    }
+
     let mut ok = 0usize;
     let mut failed = 0usize;
     let mut to_persist: Vec<(String, Vec<(u8, RgbEffect)>)> = Vec::new();
@@ -854,8 +865,23 @@ async fn apply_global_effect(
                 .map(|d| device_segments.get(&d.device_id).copied().unwrap_or(1))
                 .collect();
             let device_circular: Vec<bool> = wireless.iter().map(|d| resolve_circular(&d.device_id)).collect();
+            let device_chase: Vec<bool> = wireless.iter().map(|d| d.has_fan).collect();
+            // Real per-fan zone sizes, truncated to the user's configured
+            // fan count — a hub's `caps.zones` can include ports with no
+            // fan actually wired in (see `meteor_band_frames`).
+            let device_zone_led_counts: Vec<Vec<usize>> = wireless
+                .iter()
+                .zip(device_seg_counts.iter())
+                .map(|(d, &strip_count)| {
+                    caps.iter()
+                        .find(|c| c.device_id == d.device_id)
+                        .map(|c| c.zones.iter().take(strip_count).map(|z| z.led_count as usize).collect())
+                        .unwrap_or_default()
+                })
+                .collect();
             let relay_frames = meteor_relay_across_devices(
                 &led_counts,
+                &device_zone_led_counts,
                 frame_count,
                 pause_frames,
                 color,
@@ -864,6 +890,7 @@ async fn apply_global_effect(
                 &device_reversed,
                 &device_seg_counts,
                 &device_circular,
+                &device_chase,
                 brightness_factor,
             );
             for (device, frames) in wireless.iter().zip(relay_frames.into_iter()) {

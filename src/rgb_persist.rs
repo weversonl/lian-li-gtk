@@ -60,6 +60,30 @@ pub async fn persist_rgb_effects(ctx: &Rc<Ctx>, entries: Vec<(String, Vec<(u8, R
     let _ = ctx.client.call_unit(IpcRequest::SetConfig { config }).await;
 }
 
+/// Wipes persisted `AppConfig.rgb` zone effects for the given wireless
+/// devices — call this before switching one to an animated mode. A stale
+/// entry left over from an earlier Static apply otherwise sits there
+/// forever, and the daemon's own idle-watchdog auto-resync (see this
+/// module's top doc comment) keeps reapplying it via RF over the
+/// client-driven animation whenever the device's firmware hiccups.
+pub async fn clear_wireless_rgb_configs(ctx: &Rc<Ctx>, device_ids: &[String]) {
+    if device_ids.is_empty() {
+        return;
+    }
+    let Ok(mut config) = ctx.client.call::<AppConfig>(IpcRequest::GetConfig).await else { return };
+    let Some(rgb) = config.rgb.as_mut() else { return };
+    let mut changed = false;
+    for dev in rgb.devices.iter_mut() {
+        if device_ids.iter().any(|id| id == &dev.device_id) && !dev.zones.is_empty() {
+            dev.zones.clear();
+            changed = true;
+        }
+    }
+    if changed {
+        let _ = ctx.client.call_unit(IpcRequest::SetConfig { config }).await;
+    }
+}
+
 /// Startup cleanup: strips any persisted animated-mode zone entries for
 /// wireless devices. `SetConfig` makes the daemon push a static snapshot
 /// via RF immediately, which halts a running animation — these entries

@@ -207,6 +207,8 @@ fn build_editor(
     apply_button: &gtk::Button,
     apply_all_button: &gtk::Button,
 ) {
+    // Owned so it can be captured by 'static signal-handler closures below.
+    let device_id = device_id.to_string();
     let is_wireless = device_id.starts_with("wireless:");
 
     // A slider with marks (like FPS) or next to a shorter one-line title
@@ -243,8 +245,8 @@ fn build_editor(
         selectable_modes.extend(WIRELESS_ANIMATED_MODES);
     }
 
-    let saved_prefs = ctx.rgb_prefs_for(device_id);
-    let snapshot = ctx.editor_snapshot_for(device_id);
+    let saved_prefs = ctx.rgb_prefs_for(&device_id);
+    let snapshot = ctx.editor_snapshot_for(&device_id);
     let initial_mode = snapshot
         .as_ref()
         .map(|s| s.mode)
@@ -405,8 +407,17 @@ fn build_editor(
         gtk::Switch::builder().valign(gtk::Align::Center).active(state.borrow().meteor_circular).build();
     {
         let state = state.clone();
+        let ctx = ctx.clone();
+        let device_id = device_id.clone();
         meteor_shape_switch.connect_state_set(move |_, circular| {
-            state.borrow_mut().meteor_circular = circular;
+            let mut s = state.borrow_mut();
+            s.meteor_circular = circular;
+            // Persisted immediately, not gated behind "Aplicar" — this is
+            // hardware topology (like Global Effects' equivalent control),
+            // not part of the effect being previewed, so it shouldn't be
+            // silently lost if the user navigates away before applying.
+            ctx.set_rgb_prefs(&device_id, s.direction, s.strip_count, s.invert_direction, circular);
+            drop(s);
             glib::Propagation::Proceed
         });
     }
@@ -466,10 +477,15 @@ fn build_editor(
     direction_row.set_selected(direction_selected_index as u32);
     {
         let state = state.clone();
+        let ctx = ctx.clone();
+        let device_id = device_id.clone();
         direction_row.connect_selected_notify(move |row| {
-            if let Some(d) = ALL_DIRECTIONS.get(row.selected() as usize) {
-                state.borrow_mut().direction = *d;
-            }
+            let Some(d) = ALL_DIRECTIONS.get(row.selected() as usize) else { return };
+            let mut s = state.borrow_mut();
+            s.direction = *d;
+            // Persisted immediately — see the meteor-shape switch's comment.
+            ctx.set_rgb_prefs(&device_id, *d, s.strip_count, s.invert_direction, s.meteor_circular);
+            drop(s);
         });
     }
     mode_group.add(&direction_row);
@@ -482,8 +498,14 @@ fn build_editor(
         gtk::Switch::builder().valign(gtk::Align::Center).active(state.borrow().invert_direction).build();
     {
         let state = state.clone();
+        let ctx = ctx.clone();
+        let device_id = device_id.clone();
         invert_direction_switch.connect_state_set(move |_, enabled| {
-            state.borrow_mut().invert_direction = enabled;
+            let mut s = state.borrow_mut();
+            s.invert_direction = enabled;
+            // Persisted immediately — see the meteor-shape switch's comment.
+            ctx.set_rgb_prefs(&device_id, s.direction, s.strip_count, enabled, s.meteor_circular);
+            drop(s);
             glib::Propagation::Proceed
         });
     }
@@ -627,8 +649,16 @@ fn build_editor(
         strip_spin.set_valign(gtk::Align::Center);
         {
             let state = state.clone();
+            let ctx = ctx.clone();
+            let device_id = device_id.clone();
             strip_adj.connect_value_changed(move |adj| {
-                state.borrow_mut().strip_count = adj.value() as usize;
+                let mut s = state.borrow_mut();
+                let strip_count = adj.value() as usize;
+                s.strip_count = strip_count;
+                // Persisted immediately — same reasoning as the meteor-shape
+                // switch above, see its comment.
+                ctx.set_rgb_prefs(&device_id, s.direction, strip_count, s.invert_direction, s.meteor_circular);
+                drop(s);
             });
         }
         strip_row.add_suffix(&strip_spin);
@@ -1320,6 +1350,10 @@ async fn apply_wireless_animation(
         ctx.toast(ctx.t("rgb_editor.zero_leds"));
         return;
     }
+
+    // Clears any stale Static entry from `AppConfig.rgb` before frames
+    // start — see `rgb_persist::clear_wireless_rgb_configs`.
+    crate::rgb_persist::clear_wireless_rgb_configs(ctx, std::slice::from_ref(&device_id.to_string())).await;
 
     let cycle_ms = percent_to_cycle_ms(speed_percent);
     let frame_count = frame_count_for(fps, cycle_ms);

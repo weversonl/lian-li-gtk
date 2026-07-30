@@ -8,6 +8,7 @@ mod device_rgb_prefs;
 mod direction;
 mod editor_snapshots;
 mod effects;
+mod fan_curve_owners;
 mod i18n;
 mod identify;
 mod ipc_client;

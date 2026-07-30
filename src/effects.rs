@@ -275,11 +275,17 @@ pub fn meteor_frames(
 /// has the same meaning as in `meteor_frames` (a closed ring vs. a strip
 /// with two real ends), applied to each strip's own turn.
 ///
-/// `reverse` only flips the sweep direction *within* each strip's turn —
-/// the relay always visits strips in the same buffer order regardless, so
-/// which physical strip goes first stays fixed while just the motion
-/// inside each turn flips (a wiring-order fix shouldn't also reorder which
-/// strip the relay starts from).
+/// `frame_count_per_strip` is exactly that — each strip's own share of the
+/// lap, not the whole multi-strip turn's duration. Callers relaying across
+/// several strips (see `meteor_relay_across_devices`) divide their target
+/// turn length by the strip count before passing it in here, so a 3-fan
+/// hub's entire turn still totals the same length as a 1-strip device's.
+///
+/// `reverse` flips both the sweep direction *within* each strip's turn
+/// and which end of the assembly the relay starts from — e.g. wired
+/// fan-1→fan-2→fan-3 physically left-to-right, `reverse` runs the whole
+/// chase fan-3→fan-2→fan-1 instead, so the visible relay direction
+/// matches the direction setting instead of only the in-place sweep.
 #[allow(clippy::too_many_arguments)]
 pub fn meteor_chase_frames(
     led_count: usize,
@@ -300,7 +306,9 @@ pub fn meteor_chase_frames(
     let exit_frames = if circular { 0 } else { (frame_count_per_strip as f32 * TAIL_LEN).round() as usize };
     let mut frames: Vec<Vec<[u8; 3]>> =
         Vec::with_capacity(n_strips * (frame_count_per_strip + exit_frames) + pause_frames);
-    for w in bounds.windows(2) {
+    let windows: Vec<[usize; 2]> = bounds.windows(2).map(|w| [w[0], w[1]]).collect();
+    let ordered: Vec<[usize; 2]> = if reverse { windows.into_iter().rev().collect() } else { windows };
+    for w in ordered {
         let (start, end) = (w[0], w[1]);
         let strip_len = (end - start).max(1);
         for frame in 0..frame_count_per_strip + exit_frames {
@@ -329,6 +337,111 @@ pub fn meteor_chase_frames(
         }
     }
     frames.extend((0..pause_frames).map(|_| vec![tail; led_count]));
+    frames
+}
+
+/// Where LED `local_index` (0-based within its own `led_count`-LED ring)
+/// sits on the fan assembly's horizontal axis, as a fraction of one fan's
+/// width (`0.0` = left edge, `1.0` = right edge) — assumes the ring starts
+/// at the top (`local_index == 0`) and runs clockwise, which is the usual
+/// wiring order for these fans. LEDs on the top and bottom half of the ring
+/// that sit at the same horizontal position get (almost) the same value,
+/// since `sin` is symmetric across the vertical axis.
+fn ring_horizontal_fraction(local_index: usize, led_count: usize) -> f32 {
+    let angle = std::f32::consts::TAU * local_index as f32 / led_count.max(1) as f32;
+    (angle.sin() + 1.0) / 2.0
+}
+
+/// Each LED's position on the whole assembly's horizontal axis, in
+/// fan-widths (`0.0` = left edge of the first fan, `zone_led_counts.len()`
+/// = right edge of the last) — `None` for LEDs past the last real fan (a
+/// hub's unpopulated extra zone, e.g. a 4-port hub with only 3 fans wired
+/// in, has no physical LEDs there at all).
+fn band_positions(total_led_count: usize, zone_led_counts: &[usize]) -> Vec<Option<f32>> {
+    let mut positions = vec![None; total_led_count];
+    let mut offset = 0usize;
+    for (fan_i, &n) in zone_led_counts.iter().enumerate() {
+        for j in 0..n {
+            if offset + j >= total_led_count {
+                break;
+            }
+            positions[offset + j] = Some(fan_i as f32 + ring_horizontal_fraction(j, n));
+        }
+        offset += n;
+    }
+    positions
+}
+
+/// Fraction of one fan's width the leading (not-yet-reached) side of the
+/// band spans before fading to nothing — short and sharp, per the "entrada
+/// mais curta e definida" requirement.
+const BAND_FRONT_WIDTH: f32 = 0.35;
+/// Fraction of one fan's width the trailing (already-passed) tail spans —
+/// long and gradual, per "saída gradual, sem apagar repentinamente".
+const BAND_BACK_WIDTH: f32 = 0.85;
+
+/// A wide, physically continuous band of light sweeping once across an
+/// entire multi-fan assembly — entering at the first fan's edge, crossing
+/// fan-to-fan (with both fans lit where the band straddles the seam between
+/// them), and exiting past the last fan before a dark pause and restart.
+///
+/// Unlike `meteor_chase_frames` (which treats each fan as a separate lap,
+/// one at a time, jumping back to the start of the next), this treats every
+/// fan's ring as *one* physical horizontal surface (see `band_positions`) —
+/// a LED's brightness depends on its real position on that axis, not its
+/// index in the flat buffer, so the band crosses smoothly instead of
+/// visibly restarting or "orbiting" each fan's ring individually.
+///
+/// The band peaks at exactly `band_color` at its center — no separate
+/// forced-white core — with a short sharp leading edge and a long gradual
+/// trailing tail (asymmetric falloff, unlike `meteor_frames`' symmetric
+/// tail), fading to `background_color` (the user's own configured tail/rest
+/// color) outside the band, same as every other meteor variant. `zone_led_counts`
+/// must be only the *real* physical fans (e.g. 3 entries even if the hub's
+/// own `total_led_count` covers a 4th unpopulated port) — see `band_positions`.
+#[allow(clippy::too_many_arguments)]
+pub fn meteor_band_frames(
+    total_led_count: usize,
+    zone_led_counts: &[usize],
+    frame_count: usize,
+    pause_frames: usize,
+    head_color: [u8; 3],
+    background_color: [u8; 3],
+    reverse: bool,
+    brightness: f32,
+) -> Vec<Vec<[u8; 3]>> {
+    let positions = band_positions(total_led_count, zone_led_counts);
+    let num_fans = zone_led_counts.len().max(1) as f32;
+    let head = scale_color(head_color, brightness as f64);
+    let background = scale_color(background_color, brightness as f64);
+
+    let (start_pos, end_pos) = if reverse {
+        (num_fans + BAND_FRONT_WIDTH, -BAND_BACK_WIDTH)
+    } else {
+        (-BAND_FRONT_WIDTH, num_fans + BAND_BACK_WIDTH)
+    };
+
+    let mut frames: Vec<Vec<[u8; 3]>> = (0..frame_count)
+        .map(|frame| {
+            let t = frame as f32 / (frame_count.max(2) - 1) as f32;
+            let band_center = start_pos + (end_pos - start_pos) * t;
+            (0..total_led_count)
+                .map(|led| {
+                    let Some(pos) = positions[led] else { return background };
+                    let delta = pos - band_center;
+                    let body = if (0.0..BAND_FRONT_WIDTH).contains(&delta) {
+                        (1.0 - delta / BAND_FRONT_WIDTH).powi(3)
+                    } else if (-BAND_BACK_WIDTH..0.0).contains(&delta) {
+                        (1.0 - (-delta) / BAND_BACK_WIDTH).powf(1.5)
+                    } else {
+                        0.0
+                    };
+                    lerp_color(background, head, body)
+                })
+                .collect()
+        })
+        .collect();
+    frames.extend((0..pause_frames).map(|_| vec![background; total_led_count]));
     frames
 }
 
@@ -418,13 +531,24 @@ pub fn rainbow_wave_frames(
 }
 
 /// The L-Connect-style Meteor relay carried across *devices* instead of
-/// physical strips within one device (see `meteor_chase_frames` for the
-/// within-device version): each device takes its full turn, in the order
-/// given, before handing off to the next — fans first, then the GPU
-/// Strimer, then the motherboard Strimer, then back to the fans, matching
-/// whatever device order the user set on this page. Once every device has
-/// had a turn, `pause_frames` holds everything dark before the relay loops
-/// back to the first device.
+/// physical strips within one device: each device takes its full turn, in
+/// the order given, before handing off to the next — fans first, then the
+/// GPU Strimer, then the motherboard Strimer, then back to the fans,
+/// matching whatever device order the user set on this page. Once every
+/// device has had a turn, `pause_frames` holds everything dark before the
+/// relay loops back to the first device.
+///
+/// A device's own turn uses `meteor_band_frames` when `device_chase[i]` is
+/// set — that's for multi-fan hubs, where a wide band of light physically
+/// sweeps fan-to-fan across the hub (see `meteor_band_frames`), using each
+/// device's real per-fan zone sizes from `device_zone_led_counts[i]`.
+/// Devices with `device_chase[i]` false (e.g. a Strimer cable, where
+/// `device_strip_counts[i]` counts physical wire strands rather than
+/// separate visible units) instead use `meteor_frames`, so its strands stay
+/// synced and its own turn reads as one solid pulse along the whole cable —
+/// chasing strand-by-strand there looked like the cable lighting up one
+/// thin wire at a time instead of the whole LED. Pass `has_fan` from each
+/// device's `DeviceInfo` for `device_chase`.
 ///
 /// All returned sequences share the same total length so every device can
 /// be sent with the same `interval_ms` and stay in step — while it's not
@@ -435,6 +559,7 @@ pub fn rainbow_wave_frames(
 #[allow(clippy::too_many_arguments)]
 pub fn meteor_relay_across_devices(
     device_led_counts: &[usize],
+    device_zone_led_counts: &[Vec<usize>],
     frame_count_per_device: usize,
     pause_frames: usize,
     head_color: [u8; 3],
@@ -443,6 +568,7 @@ pub fn meteor_relay_across_devices(
     device_reversed: &[bool],
     device_strip_counts: &[usize],
     device_circular: &[bool],
+    device_chase: &[bool],
     brightness: f32,
 ) -> Vec<Vec<Vec<[u8; 3]>>> {
     let n = device_led_counts.len();
@@ -450,18 +576,35 @@ pub fn meteor_relay_across_devices(
 
     let own_turns: Vec<Vec<Vec<[u8; 3]>>> = (0..n)
         .map(|i| {
-            meteor_frames(
-                device_led_counts[i],
-                frame_count_per_device,
-                0,
-                head_color,
-                tail_color,
-                rainbow_head,
-                device_reversed.get(i).copied().unwrap_or(false),
-                device_strip_counts.get(i).copied().unwrap_or(1),
-                device_circular.get(i).copied().unwrap_or(false),
-                brightness,
-            )
+            let strip_count = device_strip_counts.get(i).copied().unwrap_or(1).max(1);
+            let reverse = device_reversed.get(i).copied().unwrap_or(false);
+            let circular = device_circular.get(i).copied().unwrap_or(false);
+            if device_chase.get(i).copied().unwrap_or(false) {
+                let zones = device_zone_led_counts.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
+                meteor_band_frames(
+                    device_led_counts[i],
+                    zones,
+                    frame_count_per_device,
+                    0,
+                    head_color,
+                    tail_color,
+                    reverse,
+                    brightness,
+                )
+            } else {
+                meteor_frames(
+                    device_led_counts[i],
+                    frame_count_per_device,
+                    0,
+                    head_color,
+                    tail_color,
+                    rainbow_head,
+                    reverse,
+                    strip_count,
+                    circular,
+                    brightness,
+                )
+            }
         })
         .collect();
 

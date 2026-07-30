@@ -1,16 +1,23 @@
 //! Fan curve editor: named temperature→PWM curves, stored in
 //! `AppConfig.fan_curves`. No dedicated Save/Delete IPC call — editing
 //! round-trips through `GetConfig` → mutate → `SetConfig`.
+//!
+//! Curves are scoped to a single fan hub each (see `fan_curve_owners`) —
+//! the daemon itself only knows curves as named entries in one global
+//! list, referenced by name from any hub's `FanGroup`, but this client
+//! never lets two hubs share a curve object, since editing one hub's
+//! curve would otherwise silently affect another hub using the same name.
 
 use crate::app_prefs::Lang;
 use crate::context::Ctx;
 use adw::prelude::*;
 use gtk::glib;
 use lianli_shared::config::AppConfig;
-use lianli_shared::fan::FanCurve;
+use lianli_shared::fan::{FanConfig, FanCurve, FanGroup, FanSpeed};
 use lianli_shared::ipc::IpcRequest;
 use lianli_shared::sensors::{SensorInfo, SensorSource};
 use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 /// Canned curve shapes for the "Curve Profile" picker; Custom keeps whatever's there.
@@ -31,7 +38,19 @@ struct SourceWidgets {
     command_help: gtk::Label,
 }
 
-pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
+/// Always entered from a specific device's dashboard (see
+/// `window.rs::build_quick_actions`) — the hub is never ambiguous, so
+/// there's no in-page hub picker; the page title carries the hub's name.
+pub fn page(ctx: &Rc<Ctx>, device_id: &str) -> adw::NavigationPage {
+    let hub_name = ctx
+        .state
+        .borrow()
+        .devices
+        .iter()
+        .find(|d| d.device_id == device_id)
+        .map(|d| ctx.display_name(d))
+        .unwrap_or_else(|| device_id.to_string());
+
     let header = adw::HeaderBar::new();
     let save_button = gtk::Button::builder().label(ctx.t("fc.save")).css_classes(["suggested-action"]).build();
     header.pack_end(&save_button);
@@ -45,9 +64,9 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
         .build();
     root.append(&loading);
     toolbar.set_content(Some(&root));
-    let page_title = ctx.t("fc.title");
 
     let ctx = ctx.clone();
+    let device_id = device_id.to_string();
     glib::spawn_future_local(async move {
         let config_result = ctx.client.call::<AppConfig>(IpcRequest::GetConfig).await;
         // Filtered to temperature readings only — ListSensors also reports
@@ -63,7 +82,7 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
         match config_result {
             Ok(config) => {
                 root.remove(&loading);
-                build_editor(&root, &ctx, config, sensors, &save_button);
+                build_editor(&root, &ctx, config, sensors, device_id, &save_button);
             }
             Err(e) => {
                 root.remove(&loading);
@@ -78,7 +97,241 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
         }
     });
 
-    adw::NavigationPage::builder().title(page_title).child(&toolbar).build()
+    adw::NavigationPage::builder().title(hub_name).child(&toolbar).build()
+}
+
+/// One hub's currently-active curve gets adopted as owning that curve if
+/// nothing owns it yet — recovers pre-existing daemon assignments made
+/// before this app tracked ownership. Anything left with no owner at all
+/// (an orphan with no hub referencing it) is adopted by the first hub, so
+/// it stays visible and editable instead of becoming unreachable.
+fn adopt_orphan_owners(config: &AppConfig, this_hub: &str, owners: &mut HashMap<String, String>) {
+    if let Some(fans) = &config.fans {
+        for group in &fans.speeds {
+            let Some(device_id) = &group.device_id else { continue };
+            for slot in &group.speeds {
+                if let FanSpeed::Curve(name) = slot {
+                    owners.entry(name.clone()).or_insert_with(|| device_id.clone());
+                }
+            }
+        }
+    }
+    // Anything still ownerless (no hub ever referenced it) is claimed by
+    // whichever hub's page happens to load first — keeps it visible and
+    // editable instead of becoming unreachable.
+    for curve in &config.fan_curves {
+        owners.entry(curve.name.clone()).or_insert_with(|| this_hub.to_string());
+    }
+}
+
+/// Guarantees every curve name is globally unique before it's sent to the
+/// daemon — `fan_controller.rs` keys curves by name in a `HashMap`, so two
+/// curves sharing a name would collide there and silently share state
+/// across hubs, exactly what per-hub ownership is meant to prevent.
+/// Renames later duplicates, fixing up any `FanGroup` reference and the
+/// ownership map to match. Returns the new names assigned, if any.
+fn dedupe_curve_names(config: &mut AppConfig, owners: &mut HashMap<String, String>) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut renames: Vec<(String, String)> = Vec::new();
+    for curve in config.fan_curves.iter_mut() {
+        let mut candidate = curve.name.clone();
+        let mut n = 2;
+        while seen.contains(&candidate) {
+            candidate = format!("{} ({n})", curve.name);
+            n += 1;
+        }
+        if candidate != curve.name {
+            renames.push((curve.name.clone(), candidate.clone()));
+            curve.name = candidate.clone();
+        }
+        seen.insert(curve.name.clone());
+    }
+    if !renames.is_empty() {
+        if let Some(fans) = config.fans.as_mut() {
+            for group in fans.speeds.iter_mut() {
+                for slot in group.speeds.iter_mut() {
+                    if let FanSpeed::Curve(nm) = slot {
+                        if let Some((_, new)) = renames.iter().find(|(old, _)| old == nm) {
+                            *nm = new.clone();
+                        }
+                    }
+                }
+            }
+        }
+        for (old, new) in &renames {
+            if let Some(owner) = owners.remove(old) {
+                owners.insert(new.clone(), owner);
+            }
+        }
+    }
+    renames.into_iter().map(|(_, new)| new).collect()
+}
+
+/// Bundles every widget and piece of shared state the editor's callbacks
+/// need, so each callback just clones this (cheap — `Rc`/GObject clones)
+/// instead of threading a dozen parameters through every function.
+#[derive(Clone)]
+struct Ui {
+    ctx: Rc<Ctx>,
+    lang: Lang,
+    config: Rc<RefCell<AppConfig>>,
+    sensors: Rc<Vec<SensorInfo>>,
+    /// The one hub this page instance is scoped to (see `page`'s doc comment).
+    hub_id: String,
+    /// Curve name → owning hub's `device_id`. Local-only, see `fan_curve_owners`.
+    owners: Rc<RefCell<HashMap<String, String>>>,
+    /// Index into `config.fan_curves` — global, not hub-local.
+    selected_curve: Rc<RefCell<Option<usize>>>,
+
+    curves_group: adw::PreferencesGroup,
+    curves_list: gtk::ListBox,
+    activate_button: gtk::Button,
+    deactivate_button: gtk::Button,
+
+    name_row: adw::EntryRow,
+    name_handler: Rc<RefCell<Option<glib::SignalHandlerId>>>,
+
+    source_widgets: SourceWidgets,
+    source_handler: Rc<RefCell<Option<glib::SignalHandlerId>>>,
+
+    profile_group: adw::PreferencesGroup,
+    profile_widget: Rc<RefCell<Option<adw::ComboRow>>>,
+
+    points_list: gtk::Box,
+    graph_area: gtk::DrawingArea,
+}
+
+impl Ui {
+    /// `config.fan_curves` indices owned by this page's hub, in list order.
+    fn owned_indices(&self) -> Vec<usize> {
+        let owners = self.owners.borrow();
+        self.config
+            .borrow()
+            .fan_curves
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| owners.get(&c.name).map(|o| o == &self.hub_id).unwrap_or(false))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The curve name currently driving this hub, if its `FanGroup` has
+    /// all 4 slots pointing at the same curve.
+    fn active_curve_name(&self) -> Option<String> {
+        let cfg = self.config.borrow();
+        let group = cfg.fans.as_ref()?.speeds.iter().find(|g| g.device_id.as_deref() == Some(self.hub_id.as_str()))?;
+        match &group.speeds[0] {
+            FanSpeed::Curve(n) if group.speeds.iter().all(|s| matches!(s, FanSpeed::Curve(m) if m == n)) => {
+                Some(n.clone())
+            }
+            _ => None,
+        }
+    }
+
+    fn persist_owners(&self) {
+        crate::fan_curve_owners::save(&self.owners.borrow());
+    }
+
+    /// Sets (or clears) which curve drives this hub.
+    fn set_active(&self, name: Option<String>) {
+        let mut cfg = self.config.borrow_mut();
+        let fans = cfg.fans.get_or_insert_with(FanConfig::default);
+        fans.speeds.retain(|g| g.device_id.as_deref() != Some(self.hub_id.as_str()));
+        if let Some(name) = name {
+            let speed = FanSpeed::Curve(name);
+            fans.speeds.push(FanGroup { device_id: Some(self.hub_id.clone()), speeds: [speed.clone(), speed.clone(), speed.clone(), speed] });
+        }
+        drop(cfg);
+        self.ctx.toast(self.ctx.t("fc.assignment_changed"));
+        self.refresh_curve_list();
+    }
+
+    /// Rebuilds the hub-scoped curve list: badges for "currently applied"
+    /// and "currently being edited" (can differ), and the active-curve
+    /// status line on the group description.
+    fn refresh_curve_list(&self) {
+        while let Some(child) = self.curves_list.first_child() {
+            self.curves_list.remove(&child);
+        }
+
+        let active_name = self.active_curve_name();
+        self.curves_group.set_description(Some(&match &active_name {
+            Some(name) => format!("{}: {name}", self.ctx.t("fc.active_curve")),
+            None => self.ctx.t("fc.no_active_curve").to_string(),
+        }));
+
+        let owned = self.owned_indices();
+        if owned.is_empty() {
+            self.curves_list
+                .append(&adw::ActionRow::builder().title(self.ctx.t("fc.no_curves")).build());
+        }
+
+        let curves = self.config.borrow().fan_curves.clone();
+        let selected = *self.selected_curve.borrow();
+        let mut selected_is_active = false;
+        for global_idx in owned {
+            let Some(curve) = curves.get(global_idx) else { continue };
+            let is_active = active_name.as_deref() == Some(curve.name.as_str());
+            let is_selected = selected == Some(global_idx);
+            if is_selected && is_active {
+                selected_is_active = true;
+            }
+
+            let row = adw::ActionRow::builder()
+                .title(curve.name.clone())
+                .subtitle(format!("{} {}", curve.curve.len(), self.ctx.t("fc.points_suffix")))
+                .activatable(true)
+                .build();
+            if is_selected {
+                row.add_css_class("selected-curve");
+            }
+            if is_active {
+                let badge = gtk::Label::builder().label(self.ctx.t("fc.active_badge")).valign(gtk::Align::Center).build();
+                badge.add_css_class("applied-curve-badge");
+                row.add_suffix(&badge);
+            } else if is_selected {
+                let badge = gtk::Label::builder().label(self.ctx.t("fc.editing_badge")).valign(gtk::Align::Center).build();
+                badge.add_css_class("editing-curve-badge");
+                row.add_suffix(&badge);
+            }
+
+            let ui = self.clone();
+            row.connect_activated(move |_| ui.select_curve(Some(global_idx)));
+            self.curves_list.append(&row);
+        }
+
+        self.activate_button.set_sensitive(selected.is_some() && !selected_is_active);
+        self.deactivate_button.set_sensitive(active_name.is_some());
+    }
+
+    /// Refreshes everything that depends on which curve is selected, but
+    /// not the curve list itself (used while the rename field has focus).
+    fn refresh_curve_dependent(&self) {
+        refresh_points(&self.points_list, &self.config, &self.selected_curve, &self.graph_area, self.lang);
+        populate_source_row(&self.source_widgets, &self.sensors, &self.config, &self.selected_curve, &self.source_handler, self.lang);
+        populate_profile_row(&self.profile_group, &self.profile_widget, &self.config, &self.selected_curve, &self.points_list, &self.graph_area, self.lang);
+        populate_name_row(&self.name_row, &self.name_handler, &self.config, &self.selected_curve);
+    }
+
+    fn select_curve(&self, idx: Option<usize>) {
+        *self.selected_curve.borrow_mut() = idx;
+        self.refresh_curve_list();
+        self.refresh_curve_dependent();
+    }
+
+    /// Picks a sensible starting curve: the hub's active one if it has
+    /// one, else its first owned curve, else nothing. Called once, right
+    /// after the page is built.
+    fn select_initial_curve(&self) {
+        let active_name = self.active_curve_name();
+        let owned = self.owned_indices();
+        let default_idx = active_name
+            .and_then(|name| owned.iter().copied().find(|&i| self.config.borrow().fan_curves.get(i).map(|c| c.name == name).unwrap_or(false)))
+            .or_else(|| owned.first().copied());
+        *self.selected_curve.borrow_mut() = default_idx;
+        self.refresh_curve_list();
+        self.refresh_curve_dependent();
+    }
 }
 
 fn build_editor(
@@ -86,14 +339,19 @@ fn build_editor(
     ctx: &Rc<Ctx>,
     config: AppConfig,
     sensors: Vec<SensorInfo>,
+    hub_id: String,
     save_button: &gtk::Button,
 ) {
     let lang = ctx.lang();
     let config = Rc::new(RefCell::new(config));
     let sensors = Rc::new(sensors);
-    let selected_curve: Rc<RefCell<Option<usize>>> = Rc::new(RefCell::new(
-        if config.borrow().fan_curves.is_empty() { None } else { Some(0) },
-    ));
+
+    let mut owners = crate::fan_curve_owners::load();
+    adopt_orphan_owners(&config.borrow(), &hub_id, &mut owners);
+    let owners = Rc::new(RefCell::new(owners));
+    crate::fan_curve_owners::save(&owners.borrow());
+
+    let selected_curve: Rc<RefCell<Option<usize>>> = Rc::new(RefCell::new(None));
 
     let scrolled = gtk::ScrolledWindow::builder().vexpand(true).build();
     let clamp = adw::Clamp::builder().maximum_size(700).build();
@@ -103,12 +361,23 @@ fn build_editor(
     content.set_margin_start(24);
     content.set_margin_end(24);
 
-    let curves_group = adw::PreferencesGroup::builder().title(ctx.t("fc.saved_curves")).build();
-    let curves_list = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let curves_group = adw::PreferencesGroup::builder().title(ctx.t("fc.hub_curves")).build();
+    // A real `ListBox`, not a plain `Box` — `AdwActionRow.activatable` only
+    // fires its "activated" signal on click when the row is a direct child
+    // of an actual `GtkListBox` (see `global_effects.rs`'s device list for
+    // the same fix), which nesting inside a plain `Box` silently defeats.
+    let curves_list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).build();
     curves_group.add(&curves_list);
     content.append(&curves_group);
 
-    let curve_buttons = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(8).build();
+    let activate_row = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(8).homogeneous(true).build();
+    let activate_button = gtk::Button::builder().label(ctx.t("fc.set_active")).hexpand(true).css_classes(["suggested-action"]).build();
+    let deactivate_button = gtk::Button::builder().label(ctx.t("fc.unassign")).hexpand(true).build();
+    activate_row.append(&activate_button);
+    activate_row.append(&deactivate_button);
+    content.append(&activate_row);
+
+    let curve_buttons = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(8).homogeneous(true).build();
     let new_button = gtk::Button::builder().label(ctx.t("fc.new_curve")).hexpand(true).build();
     let delete_curve_button = gtk::Button::builder()
         .label(ctx.t("fc.delete_curve"))
@@ -118,6 +387,11 @@ fn build_editor(
     curve_buttons.append(&new_button);
     curve_buttons.append(&delete_curve_button);
     content.append(&curve_buttons);
+
+    let name_group = adw::PreferencesGroup::new();
+    let name_row = adw::EntryRow::builder().title(ctx.t("fc.curve_name")).build();
+    name_group.add(&name_row);
+    content.append(&name_group);
 
     let source_group = adw::PreferencesGroup::builder()
         .title(ctx.t("fc.temp_source"))
@@ -208,238 +482,245 @@ fn build_editor(
         });
     }
 
-    {
-        let config = config.clone();
-        let selected_curve = selected_curve.clone();
-        let points_list = points_list.clone();
-        let graph_area = graph_area.clone();
-        graph_reset_button.connect_clicked(move |_| {
-            let Some(idx) = *selected_curve.borrow() else { return };
-            if let Some(curve) = config.borrow_mut().fan_curves.get_mut(idx) {
-                curve.curve = PRESET_BALANCED.to_vec();
-            }
-            refresh_points(&points_list, &config, &selected_curve, &graph_area, lang);
-        });
-    }
-
-    // Rebuilt fresh on every curve switch by `populate_profile_row`, since
-    // reselecting a segmented_control button without retriggering
-    // `on_change` isn't possible. Tracked so a rebuild can remove the old one.
-    let profile_widget: Rc<RefCell<Option<adw::ComboRow>>> = Rc::new(RefCell::new(None));
-    populate_profile_row(&profile_group, &profile_widget, &config, &selected_curve, &points_list, &graph_area, lang);
-
     clamp.set_child(Some(&content));
     scrolled.set_child(Some(&clamp));
     root.append(&scrolled);
 
-    // Blocked while `populate_source_row` reflects the current curve's
-    // source, so that call isn't mistaken for the user picking a new one.
-    let source_handler_id = Rc::new(RefCell::new(None::<glib::SignalHandlerId>));
+    let ui = Ui {
+        ctx: ctx.clone(),
+        lang,
+        config: config.clone(),
+        sensors: sensors.clone(),
+        hub_id: hub_id.clone(),
+        owners: owners.clone(),
+        selected_curve: selected_curve.clone(),
+        curves_group: curves_group.clone(),
+        curves_list: curves_list.clone(),
+        activate_button: activate_button.clone(),
+        deactivate_button: deactivate_button.clone(),
+        name_row: name_row.clone(),
+        name_handler: Rc::new(RefCell::new(None)),
+        source_widgets: source_widgets.clone(),
+        source_handler: Rc::new(RefCell::new(None)),
+        profile_group: profile_group.clone(),
+        profile_widget: Rc::new(RefCell::new(None)),
+        points_list: points_list.clone(),
+        graph_area: graph_area.clone(),
+    };
+
     {
-        let config = config.clone();
-        let selected_curve = selected_curve.clone();
-        let sensors = sensors.clone();
-        let command_row = command_row.clone();
-        let command_help = source_widgets.command_help.clone();
-        let ctx = ctx.clone();
+        let ui_cb = ui.clone();
         let id = source_row.connect_selected_notify(move |row| {
-            let Some(idx) = *selected_curve.borrow() else { return };
+            let Some(idx) = *ui_cb.selected_curve.borrow() else { return };
             let selected = row.selected() as usize;
-            let is_custom_command = selected == sensors.len() + 1;
-            command_row.set_visible(is_custom_command);
-            command_help.set_visible(is_custom_command);
-            let mut cfg = config.borrow_mut();
+            let is_custom_command = selected == ui_cb.sensors.len() + 1;
+            ui_cb.source_widgets.command_row.set_visible(is_custom_command);
+            ui_cb.source_widgets.command_help.set_visible(is_custom_command);
+            let mut cfg = ui_cb.config.borrow_mut();
             let Some(curve) = cfg.fan_curves.get_mut(idx) else { return };
             if selected == 0 {
                 curve.temp_source = None;
                 curve.temp_command.clear();
             } else if is_custom_command {
-                let cmd = command_row.text().to_string();
+                let cmd = ui_cb.source_widgets.command_row.text().to_string();
                 curve.temp_source = Some(SensorSource::Command { cmd: cmd.clone() });
                 curve.temp_command = cmd;
-            } else if let Some(sensor) = sensors.get(selected - 1) {
+            } else if let Some(sensor) = ui_cb.sensors.get(selected - 1) {
                 curve.temp_source = Some(sensor.source.clone());
                 curve.temp_command.clear();
             }
             drop(cfg);
             if !is_custom_command {
-                ctx.toast(ctx.t("fc.source_changed"));
+                ui_cb.ctx.toast(ui_cb.ctx.t("fc.source_changed"));
             }
         });
-        *source_handler_id.borrow_mut() = Some(id);
+        *ui.source_handler.borrow_mut() = Some(id);
     }
 
     {
-        let config = config.clone();
-        let selected_curve = selected_curve.clone();
+        let ui = ui.clone();
         command_row.connect_changed(move |entry| {
-            let Some(idx) = *selected_curve.borrow() else { return };
+            let Some(idx) = *ui.selected_curve.borrow() else { return };
             let cmd = entry.text().to_string();
-            if let Some(curve) = config.borrow_mut().fan_curves.get_mut(idx) {
+            if let Some(curve) = ui.config.borrow_mut().fan_curves.get_mut(idx) {
                 curve.temp_source = Some(SensorSource::Command { cmd: cmd.clone() });
                 curve.temp_command = cmd;
             }
         });
     }
 
-    refresh_curve_list(&curves_list, &config, &selected_curve, &points_list, &source_widgets, &sensors, &source_handler_id, &graph_area, &profile_group, &profile_widget, lang);
-    refresh_points(&points_list, &config, &selected_curve, &graph_area, lang);
-    populate_source_row(&source_widgets, &sensors, &config, &selected_curve, &source_handler_id, lang);
-    populate_profile_row(&profile_group, &profile_widget, &config, &selected_curve, &points_list, &graph_area, lang);
-
     {
-        let config = config.clone();
-        let selected_curve = selected_curve.clone();
-        let source_widgets = source_widgets.clone();
-        let sensors = sensors.clone();
-        let source_handler_id = source_handler_id.clone();
-        let graph_area = graph_area.clone();
-        let profile_group = profile_group.clone();
-        let profile_widget = profile_widget.clone();
-        new_button.connect_clicked({
-            let curves_list = curves_list.clone();
-            let points_list = points_list.clone();
-            move |_| {
-                let mut cfg = config.borrow_mut();
-                let index = cfg.fan_curves.len();
-                cfg.fan_curves.push(FanCurve {
-                    name: format!("Curve {}", index + 1),
-                    temp_source: None,
-                    temp_command: String::new(),
-                    curve: vec![(20.0, 20.0), (50.0, 60.0), (80.0, 100.0)],
-                });
-                drop(cfg);
-                *selected_curve.borrow_mut() = Some(index);
-                refresh_curve_list(&curves_list, &config, &selected_curve, &points_list, &source_widgets, &sensors, &source_handler_id, &graph_area, &profile_group, &profile_widget, lang);
-                refresh_points(&points_list, &config, &selected_curve, &graph_area, lang);
-                populate_source_row(&source_widgets, &sensors, &config, &selected_curve, &source_handler_id, lang);
-                populate_profile_row(&profile_group, &profile_widget, &config, &selected_curve, &points_list, &graph_area, lang);
+        let ui_cb = ui.clone();
+        let id = name_row.connect_changed(move |entry| {
+            let Some(idx) = *ui_cb.selected_curve.borrow() else { return };
+            let new_name = entry.text().to_string();
+            let mut cfg = ui_cb.config.borrow_mut();
+            let old_name = cfg.fan_curves.get(idx).map(|c| c.name.clone());
+            if let Some(curve) = cfg.fan_curves.get_mut(idx) {
+                curve.name = new_name.clone();
             }
-        });
-    }
-
-    {
-        let config = config.clone();
-        let selected_curve = selected_curve.clone();
-        let curves_list = curves_list.clone();
-        let points_list = points_list.clone();
-        let source_widgets = source_widgets.clone();
-        let sensors = sensors.clone();
-        let source_handler_id = source_handler_id.clone();
-        let graph_area = graph_area.clone();
-        let profile_group = profile_group.clone();
-        let profile_widget = profile_widget.clone();
-        let ctx = ctx.clone();
-        delete_curve_button.connect_clicked(move |_| {
-            let Some(idx) = *selected_curve.borrow() else { return };
-            {
-                let mut cfg = config.borrow_mut();
-                if idx < cfg.fan_curves.len() {
-                    cfg.fan_curves.remove(idx);
+            if let Some(old_name) = old_name.filter(|old| *old != new_name) {
+                if let Some(fans) = cfg.fans.as_mut() {
+                    for group in fans.speeds.iter_mut() {
+                        for slot in group.speeds.iter_mut() {
+                            if let FanSpeed::Curve(n) = slot {
+                                if *n == old_name {
+                                    *n = new_name.clone();
+                                }
+                            }
+                        }
+                    }
                 }
+                let owner = ui_cb.owners.borrow_mut().remove(&old_name);
+                if let Some(owner) = owner {
+                    ui_cb.owners.borrow_mut().insert(new_name.clone(), owner);
+                }
+                ui_cb.persist_owners();
             }
-            let remaining = config.borrow().fan_curves.len();
-            *selected_curve.borrow_mut() = if remaining == 0 {
-                None
-            } else {
-                Some(idx.min(remaining - 1))
-            };
-            refresh_curve_list(&curves_list, &config, &selected_curve, &points_list, &source_widgets, &sensors, &source_handler_id, &graph_area, &profile_group, &profile_widget, lang);
-            refresh_points(&points_list, &config, &selected_curve, &graph_area, lang);
-            populate_source_row(&source_widgets, &sensors, &config, &selected_curve, &source_handler_id, lang);
-            populate_profile_row(&profile_group, &profile_widget, &config, &selected_curve, &points_list, &graph_area, lang);
-            ctx.toast(ctx.t("fc.curve_removed"));
+            drop(cfg);
+            ui_cb.refresh_curve_list();
+        });
+        *ui.name_handler.borrow_mut() = Some(id);
+    }
+
+    {
+        let ui = ui.clone();
+        activate_button.connect_clicked(move |_| {
+            let Some(idx) = *ui.selected_curve.borrow() else { return };
+            let name = ui.config.borrow().fan_curves.get(idx).map(|c| c.name.clone());
+            ui.set_active(name);
         });
     }
 
     {
-        let config = config.clone();
-        let selected_curve = selected_curve.clone();
-        let graph_area = graph_area.clone();
+        let ui = ui.clone();
+        deactivate_button.connect_clicked(move |_| ui.set_active(None));
+    }
+
+    {
+        let ui = ui.clone();
+        new_button.connect_clicked(move |_| {
+            let hub_id = ui.hub_id.clone();
+            let mut cfg = ui.config.borrow_mut();
+            let existing_names: HashSet<String> = cfg.fan_curves.iter().map(|c| c.name.clone()).collect();
+            let mut name = format!("{} {}", ui.ctx.t("fc.new_curve"), cfg.fan_curves.len() + 1);
+            let mut n = 2;
+            while existing_names.contains(&name) {
+                name = format!("{} {} ({n})", ui.ctx.t("fc.new_curve"), cfg.fan_curves.len() + 1);
+                n += 1;
+            }
+            let index = cfg.fan_curves.len();
+            cfg.fan_curves.push(FanCurve {
+                name: name.clone(),
+                temp_source: None,
+                temp_command: String::new(),
+                curve: vec![(20.0, 20.0), (50.0, 60.0), (80.0, 100.0)],
+            });
+            drop(cfg);
+            ui.owners.borrow_mut().insert(name, hub_id);
+            ui.persist_owners();
+            ui.select_curve(Some(index));
+        });
+    }
+
+    {
+        let ui = ui.clone();
+        delete_curve_button.connect_clicked(move |_| {
+            let Some(idx) = *ui.selected_curve.borrow() else { return };
+            let removed_name = {
+                let mut cfg = ui.config.borrow_mut();
+                if idx >= cfg.fan_curves.len() {
+                    return;
+                }
+                let removed = cfg.fan_curves.remove(idx);
+                if let Some(fans) = cfg.fans.as_mut() {
+                    for group in fans.speeds.iter_mut() {
+                        for slot in group.speeds.iter_mut() {
+                            if matches!(slot, FanSpeed::Curve(n) if *n == removed.name) {
+                                *slot = FanSpeed::Constant(0);
+                            }
+                        }
+                    }
+                    fans.speeds.retain(|g| !g.speeds.iter().all(|s| matches!(s, FanSpeed::Constant(0))));
+                }
+                removed.name
+            };
+            ui.owners.borrow_mut().remove(&removed_name);
+            ui.persist_owners();
+            let owned = ui.owned_indices();
+            *ui.selected_curve.borrow_mut() = owned.first().copied();
+            ui.refresh_curve_list();
+            ui.refresh_curve_dependent();
+            ui.ctx.toast(ui.ctx.t("fc.curve_removed"));
+        });
+    }
+
+    {
+        let ui = ui.clone();
+        graph_reset_button.connect_clicked(move |_| {
+            let Some(idx) = *ui.selected_curve.borrow() else { return };
+            if let Some(curve) = ui.config.borrow_mut().fan_curves.get_mut(idx) {
+                curve.curve = PRESET_BALANCED.to_vec();
+            }
+            refresh_points(&ui.points_list, &ui.config, &ui.selected_curve, &ui.graph_area, ui.lang);
+        });
+    }
+
+    {
+        let ui = ui.clone();
         add_point_button.connect_clicked(move |_| {
-            let Some(idx) = *selected_curve.borrow() else { return };
-            if let Some(curve) = config.borrow_mut().fan_curves.get_mut(idx) {
+            let Some(idx) = *ui.selected_curve.borrow() else { return };
+            if let Some(curve) = ui.config.borrow_mut().fan_curves.get_mut(idx) {
                 curve.curve.push((50.0, 50.0));
             }
-            refresh_points(&points_list, &config, &selected_curve, &graph_area, lang);
+            refresh_points(&ui.points_list, &ui.config, &ui.selected_curve, &ui.graph_area, ui.lang);
         });
     }
 
-    let ctx = ctx.clone();
-    save_button.connect_clicked(move |_| {
-        let ctx = ctx.clone();
-        let config = (*config.borrow()).clone();
-        glib::spawn_future_local(async move {
-            match ctx.client.call_unit(IpcRequest::SetConfig { config }).await {
-                Ok(()) => ctx.toast(ctx.t("fc.curves_saved")),
-                Err(e) => ctx.toast(&format!("{}: {e}", ctx.t("fc.failed_save"))),
-            }
+    {
+        let ui = ui.clone();
+        save_button.connect_clicked(move |_| {
+            let ui = ui.clone();
+            glib::spawn_future_local(async move {
+                let mut config = (*ui.config.borrow()).clone();
+                let mut owners = ui.owners.borrow().clone();
+                let renamed = dedupe_curve_names(&mut config, &mut owners);
+                if !renamed.is_empty() {
+                    *ui.owners.borrow_mut() = owners.clone();
+                    ui.persist_owners();
+                    *ui.config.borrow_mut() = config.clone();
+                    ui.refresh_curve_list();
+                    ui.ctx.toast(ui.ctx.t("fc.names_deduped"));
+                }
+                match ui.ctx.client.call_unit(IpcRequest::SetConfig { config }).await {
+                    Ok(()) => ui.ctx.toast(ui.ctx.t("fc.curves_saved")),
+                    Err(e) => ui.ctx.toast(&format!("{}: {e}", ui.ctx.t("fc.failed_save"))),
+                }
+            });
         });
-    });
+    }
+
+    ui.select_initial_curve();
 }
 
-fn refresh_curve_list(
-    list_box: &gtk::Box,
+/// Rebuilds the curve-rename `EntryRow` to reflect the selected curve's
+/// current name — blocked while set, so this isn't mistaken for the user
+/// typing a rename.
+fn populate_name_row(
+    name_row: &adw::EntryRow,
+    name_handler: &Rc<RefCell<Option<glib::SignalHandlerId>>>,
     config: &Rc<RefCell<AppConfig>>,
     selected_curve: &Rc<RefCell<Option<usize>>>,
-    points_list: &gtk::Box,
-    source_widgets: &SourceWidgets,
-    sensors: &Rc<Vec<SensorInfo>>,
-    source_handler_id: &Rc<RefCell<Option<glib::SignalHandlerId>>>,
-    graph_area: &gtk::DrawingArea,
-    profile_group: &adw::PreferencesGroup,
-    profile_widget: &Rc<RefCell<Option<adw::ComboRow>>>,
-    lang: Lang,
 ) {
-    while let Some(child) = list_box.first_child() {
-        list_box.remove(&child);
+    if let Some(id) = name_handler.borrow().as_ref() {
+        name_row.block_signal(id);
     }
-
-    let curves = config.borrow().fan_curves.clone();
-    if curves.is_empty() {
-        list_box.append(&adw::ActionRow::builder().title(crate::i18n::t(lang, "fc.no_curves")).build());
-        return;
-    }
-
-    for (i, curve) in curves.iter().enumerate() {
-        let row = adw::ActionRow::builder()
-            .title(curve.name.clone())
-            .subtitle(format!("{} {}", curve.curve.len(), crate::i18n::t(lang, "fc.points_suffix")))
-            .activatable(true)
-            .build();
-        if Some(i) == *selected_curve.borrow() {
-            row.add_css_class("selected-curve");
-        }
-        let selected_curve_cb = selected_curve.clone();
-        let config_cb = config.clone();
-        let list_box_cb = list_box.clone();
-        let points_list_cb = points_list.clone();
-        let source_widgets_cb = source_widgets.clone();
-        let sensors_cb = sensors.clone();
-        let source_handler_id_cb = source_handler_id.clone();
-        let graph_area_cb = graph_area.clone();
-        let profile_row_cb = profile_group.clone();
-        let profile_widget_cb = profile_widget.clone();
-        row.connect_activated(move |_| {
-            *selected_curve_cb.borrow_mut() = Some(i);
-            refresh_curve_list(
-                &list_box_cb,
-                &config_cb,
-                &selected_curve_cb,
-                &points_list_cb,
-                &source_widgets_cb,
-                &sensors_cb,
-                &source_handler_id_cb,
-                &graph_area_cb,
-                &profile_row_cb,
-                &profile_widget_cb,
-                lang,
-            );
-            refresh_points(&points_list_cb, &config_cb, &selected_curve_cb, &graph_area_cb, lang);
-            populate_source_row(&source_widgets_cb, &sensors_cb, &config_cb, &selected_curve_cb, &source_handler_id_cb, lang);
-            populate_profile_row(&profile_row_cb, &profile_widget_cb, &config_cb, &selected_curve_cb, &points_list_cb, &graph_area_cb, lang);
-        });
-        list_box.append(&row);
+    let idx = *selected_curve.borrow();
+    let name = idx.and_then(|i| config.borrow().fan_curves.get(i).map(|c| c.name.clone())).unwrap_or_default();
+    name_row.set_text(&name);
+    name_row.set_sensitive(idx.is_some());
+    if let Some(id) = name_handler.borrow().as_ref() {
+        name_row.unblock_signal(id);
     }
 }
 

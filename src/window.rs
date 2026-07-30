@@ -773,9 +773,10 @@ fn build_quick_actions(device: &DeviceInfo, ctx: &Rc<Ctx>) -> Option<gtk::Widget
         any = true;
     }
     if device.has_fan {
+        let device_id = device.device_id.clone();
         let ctx = ctx.clone();
         group.add(&nav_action_row(ctx.t("dashboard.fan_curve"), move |ctx| {
-            ctx.push(&fan_curve::page(ctx));
+            ctx.push(&fan_curve::page(ctx, &device_id));
         }, &ctx));
         any = true;
     }
@@ -933,6 +934,26 @@ fn load_app_css() {
             min-width: 16px; \
             min-height: 16px; \
             opacity: 0.5; \
+        } \
+        row.selected-curve { \
+            background-color: alpha(@accent_bg_color, 0.18); \
+            border-radius: 8px; \
+        } \
+        .applied-curve-badge { \
+            background-color: alpha(@success_color, 0.20); \
+            color: @success_color; \
+            padding: 2px 10px; \
+            border-radius: 999px; \
+            font-size: 0.85em; \
+            font-weight: bold; \
+        } \
+        .editing-curve-badge { \
+            background-color: alpha(@accent_color, 0.18); \
+            color: @accent_color; \
+            padding: 2px 10px; \
+            border-radius: 999px; \
+            font-size: 0.85em; \
+            font-weight: bold; \
         }",
     );
     if let Some(display) = gtk::gdk::Display::default() {
