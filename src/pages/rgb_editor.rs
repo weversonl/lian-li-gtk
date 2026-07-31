@@ -69,6 +69,12 @@ fn is_meteor_mode(mode: RgbMode) -> bool {
 const SLIDER_WIDTH: i32 = 260;
 const SLIDER_VALUE_LABEL_WIDTH: i32 = 44;
 
+/// Clicking Apply again before the previous `SetRgbFrames` transfer lands
+/// fires a second one that garbles both on the RF layer. A fixed cooldown
+/// closes that window without needing to track completion of every apply
+/// path — Segments' per-zone loop, in particular, never actually completes.
+const APPLY_COOLDOWN_MS: u64 = 2000;
+
 #[derive(Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum MiddleKind {
     Solid,
@@ -1202,6 +1208,7 @@ fn build_editor(
                     middle_mode,
                     middle_colors,
                     middle_brightness_percent,
+                    segments_applied_to_all_zones: apply_to_all && segments_enabled,
                 },
             );
 
@@ -1304,13 +1311,36 @@ fn build_editor(
         }
     };
 
+    let start_apply_cooldown = {
+        let apply_button = apply_button.clone();
+        let apply_all_button = apply_all_button.clone();
+        move || {
+            apply_button.set_sensitive(false);
+            apply_all_button.set_sensitive(false);
+            let apply_button = apply_button.clone();
+            let apply_all_button = apply_all_button.clone();
+            glib::spawn_future_local(async move {
+                glib::timeout_future(std::time::Duration::from_millis(APPLY_COOLDOWN_MS)).await;
+                apply_button.set_sensitive(true);
+                apply_all_button.set_sensitive(true);
+            });
+        }
+    };
+
     {
         let do_apply = do_apply.clone();
-        apply_button.connect_clicked(move |_| do_apply(false));
+        let start_apply_cooldown = start_apply_cooldown.clone();
+        apply_button.connect_clicked(move |_| {
+            start_apply_cooldown();
+            do_apply(false);
+        });
     }
     if zone_count > 1 {
         apply_all_button.set_visible(true);
-        apply_all_button.connect_clicked(move |_| do_apply(true));
+        apply_all_button.connect_clicked(move |_| {
+            start_apply_cooldown();
+            do_apply(true);
+        });
     }
 }
 
@@ -1505,34 +1535,91 @@ pub(crate) async fn apply_segments_from_snapshot(
     snapshot: &crate::context::RgbEditorSnapshot,
 ) {
     let prefs = ctx.rgb_prefs_for(device_id);
-    apply_segments(
-        ctx,
-        device_id,
-        is_wireless,
-        snapshot.zone,
-        snapshot.edge_by_strip,
-        snapshot.edge_count as usize,
-        snapshot.edge_color,
-        snapshot.edge_start,
-        snapshot.edge_end,
-        snapshot.edge_brightness_percent,
-        snapshot.edge_kind,
-        snapshot.edge_mode,
-        snapshot.edge_colors,
-        snapshot.middle_kind,
-        snapshot.middle_color,
-        snapshot.middle_mode,
-        snapshot.middle_colors,
-        snapshot.middle_brightness_percent,
-        snapshot.speed_percent,
-        snapshot.fps,
-        snapshot.meteor_pause_secs,
-        snapshot.direction,
-        prefs.invert_direction,
-        prefs.meteor_circular,
-        snapshot.strip_count,
-    )
-    .await;
+
+    // Re-derive the full zone list from current capabilities rather than
+    // trusting a possibly-stale stored count.
+    let zones: Vec<u8> = if snapshot.segments_applied_to_all_zones {
+        match ctx.client.call::<Vec<RgbDeviceCapabilities>>(IpcRequest::GetRgbCapabilities).await {
+            Ok(caps) => caps
+                .iter()
+                .find(|c| c.device_id == device_id)
+                .map(|c| (0..c.zones.len() as u8).collect())
+                .unwrap_or_else(|| vec![snapshot.zone]),
+            Err(_) => vec![snapshot.zone],
+        }
+    } else {
+        vec![snapshot.zone]
+    };
+
+    // A per-zone animated Segments loop never returns, so more than one
+    // zone needs its own task each (same as `do_apply`'s "Aplicar a Todos").
+    if let [only_zone] = zones[..] {
+        apply_segments(
+            ctx,
+            device_id,
+            is_wireless,
+            only_zone,
+            snapshot.edge_by_strip,
+            snapshot.edge_count as usize,
+            snapshot.edge_color,
+            snapshot.edge_start,
+            snapshot.edge_end,
+            snapshot.edge_brightness_percent,
+            snapshot.edge_kind,
+            snapshot.edge_mode,
+            snapshot.edge_colors,
+            snapshot.middle_kind,
+            snapshot.middle_color,
+            snapshot.middle_mode,
+            snapshot.middle_colors,
+            snapshot.middle_brightness_percent,
+            snapshot.speed_percent,
+            snapshot.fps,
+            snapshot.meteor_pause_secs,
+            snapshot.direction,
+            prefs.invert_direction,
+            prefs.meteor_circular,
+            snapshot.strip_count,
+        )
+        .await;
+        return;
+    }
+
+    for zone in zones {
+        let ctx = ctx.clone();
+        let device_id = device_id.to_string();
+        let snapshot = snapshot.clone();
+        glib::spawn_future_local(async move {
+            apply_segments(
+                &ctx,
+                &device_id,
+                is_wireless,
+                zone,
+                snapshot.edge_by_strip,
+                snapshot.edge_count as usize,
+                snapshot.edge_color,
+                snapshot.edge_start,
+                snapshot.edge_end,
+                snapshot.edge_brightness_percent,
+                snapshot.edge_kind,
+                snapshot.edge_mode,
+                snapshot.edge_colors,
+                snapshot.middle_kind,
+                snapshot.middle_color,
+                snapshot.middle_mode,
+                snapshot.middle_colors,
+                snapshot.middle_brightness_percent,
+                snapshot.speed_percent,
+                snapshot.fps,
+                snapshot.meteor_pause_secs,
+                snapshot.direction,
+                prefs.invert_direction,
+                prefs.meteor_circular,
+                snapshot.strip_count,
+            )
+            .await;
+        });
+    }
 }
 
 /// Colors each strip's (or, per-zone, the selected zone's) ends and middle
@@ -1584,6 +1671,13 @@ pub(crate) async fn apply_segments(
         ctx.toast(ctx.t("rgb_editor.caps_not_found"));
         return;
     };
+
+    // Same as `apply_wireless_animation` — clears any stale Static entry
+    // so the daemon's idle-watchdog auto-resync doesn't push it back over
+    // this animation (see `rgb_persist`).
+    if is_wireless {
+        crate::rgb_persist::clear_wireless_rgb_configs(ctx, std::slice::from_ref(&device_id.to_string())).await;
+    }
 
     // A single-zone wireless device (e.g. a Strimer cable) has no per-zone
     // addressing, so it always goes through `SetRgbFrames` for the whole

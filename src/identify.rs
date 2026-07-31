@@ -99,10 +99,16 @@ async fn reapply_last_effect_inner(ctx: &Rc<Ctx>, device_id: &str, notify_on_fai
 }
 
 /// Guards against the firmware silently resetting a device's lighting to
-/// factory default without dropping from `ListDevices`. Segments excluded
-/// (self-heals via its own live loop). Devices are re-sent sequentially,
-/// not concurrently — parallel sends to all 4 wireless devices saturated
-/// the shared RF dongle and caused real fan stalls/RGB flicker.
+/// factory default without dropping from `ListDevices`. Devices are
+/// re-sent sequentially, not concurrently — parallel sends to all 4
+/// wireless devices saturated the shared RF dongle and caused real fan
+/// stalls/RGB flicker.
+///
+/// Scoped to `LastEffect::Frames` only, which already excludes per-zone
+/// animated Segments (that self-heals via its own `SetRgbDirect` loop and
+/// never records a `Frames` entry) while still covering whole-device
+/// Segments (a single-zone device applies via one `SetRgbFrames`, same as
+/// any other animated effect, and needs the same reinforcement).
 const HEARTBEAT_SECS: u64 = 20;
 
 pub fn spawn_frame_heartbeat(ctx: &Rc<Ctx>) {
@@ -121,14 +127,9 @@ pub fn spawn_frame_heartbeat(ctx: &Rc<Ctx>) {
                 .collect();
 
             for device_id in device_ids {
-                let has_segments =
-                    ctx.editor_snapshot_for(&device_id).is_some_and(|s| s.segments_enabled);
                 let Some(LastEffect::Frames(frames, interval_ms, _)) = ctx.last_effect_for(&device_id) else {
                     continue;
                 };
-                if has_segments {
-                    continue;
-                }
                 let request = IpcRequest::SetRgbFrames { device_id, frames, interval_ms };
                 let _ = ctx.client.call_unit(request).await;
             }

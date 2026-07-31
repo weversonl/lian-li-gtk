@@ -416,6 +416,7 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
         let global_direction = global_direction.clone();
         let gradient_colors = gradient_colors.clone();
         let sync_devices_switch = sync_devices_switch.clone();
+        let apply_button_for_reenable = apply_button.clone();
         apply_button.connect_clicked(move |_| {
             let ctx = ctx.clone();
             let devices = ordered_devices.borrow().clone();
@@ -450,6 +451,8 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
                 meteor_pause_secs,
                 sync_devices: sync_devices_value,
             });
+            let apply_button = apply_button_for_reenable.clone();
+            apply_button.set_sensitive(false);
             glib::spawn_future_local(async move {
                 apply_global_effect(
                     &ctx,
@@ -468,6 +471,9 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
                     &segments,
                 )
                 .await;
+                // Re-enable only once the transfer actually lands, so a
+                // second click can't fire an overlapping one mid-transfer.
+                apply_button.set_sensitive(true);
             });
         });
     }

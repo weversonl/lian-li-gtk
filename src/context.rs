@@ -70,6 +70,11 @@ pub struct RgbEditorSnapshot {
     pub fps: f64,
     #[serde(default = "default_meteor_pause_secs")]
     pub meteor_pause_secs: f64,
+    /// Whether this Segments effect was pushed to every zone via "Aplicar a
+    /// Todos" — only one snapshot is kept per device, so this tells
+    /// `apply_segments_from_snapshot` to restore every zone, not just `zone`.
+    #[serde(default)]
+    pub segments_applied_to_all_zones: bool,
 }
 
 fn default_true() -> bool {
