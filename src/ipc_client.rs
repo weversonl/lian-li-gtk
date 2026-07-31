@@ -4,11 +4,22 @@
 //! every call opens a fresh connection, sends one line, reads one line.
 
 use anyhow::{bail, Context, Result};
+use async_io::Timer;
 use async_net::unix::UnixStream;
+use futures_lite::future::or;
 use futures_lite::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use lianli_shared::ipc::{IpcRequest, IpcResponse};
 use serde::de::DeserializeOwned;
 use std::path::PathBuf;
+use std::time::Duration;
+
+/// `SetRgbFrames` only acks once the daemon finishes the whole chunked RF
+/// transfer, which can legitimately take a while for a long animation — so
+/// this has to stay generous. It only exists to bound a genuinely wedged
+/// daemon (stuck socket, deadlock), not to catch normal slowness; a call
+/// with no timeout at all hangs its caller's `.await` forever, leaving a
+/// page stuck on "loading" with no way to tell a hang from real latency.
+const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct IpcClient {
@@ -36,6 +47,15 @@ impl IpcClient {
     }
 
     async fn call_raw(&self, request: IpcRequest) -> Result<serde_json::Value> {
+        or(self.call_raw_inner(request), Self::timeout()).await
+    }
+
+    async fn timeout() -> Result<serde_json::Value> {
+        Timer::after(CALL_TIMEOUT).await;
+        bail!("daemon did not respond within {}s", CALL_TIMEOUT.as_secs())
+    }
+
+    async fn call_raw_inner(&self, request: IpcRequest) -> Result<serde_json::Value> {
         let stream = UnixStream::connect(&self.socket_path)
             .await
             .with_context(|| {

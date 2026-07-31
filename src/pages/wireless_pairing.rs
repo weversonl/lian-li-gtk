@@ -106,8 +106,8 @@ fn populate(list_box: &gtk::Box, ctx: &Rc<Ctx>, busy_row: &gtk::Box, spinner: &g
             .to_string();
 
         let row = adw::ActionRow::builder()
-            .title(ctx.display_name(&device))
-            .subtitle(mac.clone())
+            .title(glib::markup_escape_text(&ctx.display_name(&device)))
+            .subtitle(glib::markup_escape_text(&mac))
             .build();
 
         let button = if device.is_unbound_wireless {

@@ -44,6 +44,58 @@ I use a fully wireless Lian Li setup (fans + Strimer cables over the RF dongle, 
   - The last effect applied to every device — including client-rendered wireless animations and Segments presets, neither of which live in the daemon's config — is automatically reapplied on reconnect, on app reopen after a reboot, and via the Identify button.
   - A periodic heartbeat quietly re-sends a running wireless animation every 20s, guarding against a device's firmware silently resetting its lighting to factory defaults without ever actually dropping off — all synced devices restart in lockstep so a cross-device relay never drifts out of phase.
 
+## Supported Devices
+
+This client has no per-device code — every device family goes through the same generic `ListDevices` → `GetRgbCapabilities` → `SetRgbEffect`/`SetRgbFrames`/fan-curve pipeline. The status below reflects how much validation each one has actually gotten against real hardware, not whether the code path exists.
+
+### Tested against real hardware
+
+| Device | Family | Interface | What was validated |
+| --- | --- | --- | --- |
+| UNI FAN SL-INF Wireless | `SlInf` | RF dongle | RGB (including per-fan Meteor band effect), fan curves, reconnect/heartbeat resilience |
+| Strimer Plus Wireless | `WirelessStrimer` | RF dongle | RGB (per-cable LED strip layout calibrated against real strand counts) |
+
+### Should work (same wireless pipeline, not personally tested)
+
+| Device | Family |
+| --- | --- |
+| CL / RL120 Wireless Fan | `Clv1` |
+| UNI FAN SL-V3 Wireless (LED only) | `Slv3Led` |
+| UNI FAN TL-V2 Wireless (LED only) | `Tlv2Led` |
+| Wireless AIO (WaterBlock / WaterBlock2) | `WirelessAio` |
+| Wireless Lancool 217 RGB Ring | `WirelessLc217` |
+| Wireless Lancool V150 Fan/RGB | `WirelessV150` |
+| Wireless Universal Screen 8.8" LED Ring | `WirelessLed88` |
+
+Same `ListDevices`/`GetRgbCapabilities`/`SetRgbFrames` calls as the two families above, nothing family-specific in this app. The main unknown for a new device is per-device calibration (LED strip count, Meteor ring offset) — same thing the Strimer cables above needed.
+
+### Untested feature areas — LCD content, AIO pump control
+
+No device this app has been developed against has an LCD screen or a controllable pump, so the LCD Content page and pump control have never been exercised on real hardware, on any family:
+
+| Device | Family | Untested feature |
+| --- | --- | --- |
+| UNI FAN SL-V3 Wireless (LCD) | `Slv3Lcd` | LCD |
+| UNI FAN TL-V2 Wireless (LCD) | `Tlv2Lcd` | LCD |
+| Galahad II Trinity AIO | `Galahad2Trinity` | Pump + fan (wired) |
+| HydroShift LCD AIO | `HydroShiftLcd` | Pump + fan + LCD (wired) |
+| Galahad II LCD/Vision AIO | `Galahad2Lcd` | Pump + fan + LCD (wired) |
+| HydroShift II LCD Circle AIO | `HydroShift2Lcd` / `HydroShift2LcdDesktop` | Pump + fan + LCD (wired) |
+| TLLCD | `TlLcd` | LCD (wired) |
+| Lancool 207 Digital | `Lancool207` / `Lancool207Desktop` | Case LCD (wired) |
+| Universal Screen 8.8" | `UniversalScreen` / `UniversalScreenDesktop` | Screen (wired) |
+
+### Wired-only, untested
+
+| Device | Family |
+| --- | --- |
+| ENE 6K77 wired fans (SL/AL series) | `Ene6k77` |
+| TL Fan controller | `TlFan` |
+| Strimer Plus (wired, HID) | `StrimerPlus` |
+| Universal Screen 8.8" LED Ring (HID) | `UniversalScreenLighting` |
+
+This app has only ever been run against a fully wireless setup. The wired HID code path lives entirely in the upstream daemon and reports through the same `GetRgbCapabilities`/`SetRgbEffect` calls, so it should behave identically — it just hasn't actually been exercised from this client yet.
+
 ## Tech stack
 
 - **[Rust](https://www.rust-lang.org/)** — the whole client.

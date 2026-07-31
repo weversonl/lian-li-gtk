@@ -995,7 +995,7 @@ fn graph_to_data(x: f64, y: f64, plot: (f64, f64, f64, f64)) -> (f32, f32) {
 /// Sorts curve `idx`'s points by temperature ascending, in place.
 fn sort_curve(config: &Rc<RefCell<AppConfig>>, idx: usize) {
     if let Some(curve) = config.borrow_mut().fan_curves.get_mut(idx) {
-        curve.curve.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        curve.curve.sort_by(|a, b| a.0.total_cmp(&b.0));
     }
 }
 
@@ -1008,7 +1008,7 @@ fn graph_hit_test(points: &[(f32, f32)], x: f64, y: f64, plot: (f64, f64, f64, f
             let (px, py) = graph_to_pixel(temp, pwm, plot);
             (i, (px - x).hypot(py - y))
         })
-        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
         .filter(|(_, dist)| *dist <= POINT_HIT_RADIUS_PX)
         .map(|(i, _)| i)
 }
@@ -1053,7 +1053,7 @@ fn build_curve_graph(config: &Rc<RefCell<AppConfig>>, selected_curve: &Rc<RefCel
             if points.is_empty() {
                 return;
             }
-            points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            points.sort_by(|a, b| a.0.total_cmp(&b.0));
 
             cr.set_source_rgba(0.31, 0.55, 0.95, 0.9);
             cr.set_line_width(2.0);

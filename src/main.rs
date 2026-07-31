@@ -12,6 +12,7 @@ mod fan_curve_owners;
 mod i18n;
 mod identify;
 mod ipc_client;
+mod json_store;
 mod last_effect;
 mod pages;
 mod profiles;

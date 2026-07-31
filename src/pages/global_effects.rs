@@ -505,7 +505,7 @@ fn render_device_order(
     let count = devices.len();
     for (i, device) in devices.iter().enumerate() {
         let row = adw::ExpanderRow::builder()
-            .title(ctx.display_name(device))
+            .title(glib::markup_escape_text(&ctx.display_name(device)))
             .title_lines(1)
             .build();
         let index_label = gtk::Label::builder()

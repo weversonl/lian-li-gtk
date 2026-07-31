@@ -76,10 +76,3 @@ pub fn start_polling(
         }
     });
 }
-
-#[allow(dead_code)]
-pub async fn refresh_presets(client: &IpcClient, state: &SharedState) -> anyhow::Result<()> {
-    let presets = client.call::<Vec<RgbPreset>>(IpcRequest::ListRgbPresets).await?;
-    state.borrow_mut().presets = presets;
-    Ok(())
-}
