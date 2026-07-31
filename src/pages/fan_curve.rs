@@ -158,8 +158,20 @@ fn dedupe_curve_names(config: &mut AppConfig, owners: &mut HashMap<String, Strin
                 }
             }
         }
-        for (old, new) in &renames {
-            if let Some(owner) = owners.remove(old) {
+        // `old` is kept by whichever curve didn't get renamed, so its owner
+        // entry must stay put — moving it (as an earlier version of this
+        // function did) left that curve ownerless. The renamed duplicate's
+        // owner is instead derived from the `FanGroup` that now actually
+        // references its new name, if any.
+        for (_, new) in &renames {
+            let owner = config.fans.as_ref().and_then(|fans| {
+                fans.speeds.iter().find_map(|group| {
+                    let references_new =
+                        group.speeds.iter().any(|s| matches!(s, FanSpeed::Curve(nm) if nm == new));
+                    references_new.then(|| group.device_id.clone()).flatten()
+                })
+            });
+            if let Some(owner) = owner {
                 owners.insert(new.clone(), owner);
             }
         }
@@ -1167,4 +1179,215 @@ fn build_curve_graph(config: &Rc<RefCell<AppConfig>>, selected_curve: &Rc<RefCel
     area.add_controller(secondary_click);
 
     area
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn curve(name: &str, points: &[(f32, f32)]) -> FanCurve {
+        FanCurve {
+            name: name.to_string(),
+            temp_source: None,
+            temp_command: String::new(),
+            curve: points.to_vec(),
+        }
+    }
+
+    fn group(device_id: &str, curve_name: &str) -> FanGroup {
+        FanGroup {
+            device_id: Some(device_id.to_string()),
+            speeds: [
+                FanSpeed::Curve(curve_name.to_string()),
+                FanSpeed::Constant(0),
+                FanSpeed::Constant(0),
+                FanSpeed::Constant(0),
+            ],
+        }
+    }
+
+    #[test]
+    fn adopt_orphan_owners_claims_curve_referenced_by_a_hub() {
+        let mut config = AppConfig::default();
+        config.fan_curves.push(curve("Silent", &[(20.0, 20.0)]));
+        config.fans = Some(FanConfig { speeds: vec![group("wireless:AA", "Silent")], ..FanConfig::default() });
+
+        let mut owners = HashMap::new();
+        adopt_orphan_owners(&config, "wireless:BB", &mut owners);
+
+        assert_eq!(owners.get("Silent"), Some(&"wireless:AA".to_string()));
+    }
+
+    #[test]
+    fn adopt_orphan_owners_claims_unreferenced_curve_as_this_hub() {
+        let mut config = AppConfig::default();
+        config.fan_curves.push(curve("Orphan", &[(20.0, 20.0)]));
+        // No FanGroup references "Orphan" at all.
+
+        let mut owners = HashMap::new();
+        adopt_orphan_owners(&config, "wireless:BB", &mut owners);
+
+        assert_eq!(owners.get("Orphan"), Some(&"wireless:BB".to_string()));
+    }
+
+    #[test]
+    fn adopt_orphan_owners_never_overwrites_an_existing_owner() {
+        let mut config = AppConfig::default();
+        config.fan_curves.push(curve("Silent", &[(20.0, 20.0)]));
+        config.fans = Some(FanConfig { speeds: vec![group("wireless:AA", "Silent")], ..FanConfig::default() });
+
+        let mut owners = HashMap::new();
+        owners.insert("Silent".to_string(), "wireless:CC".to_string());
+        adopt_orphan_owners(&config, "wireless:BB", &mut owners);
+
+        assert_eq!(owners.get("Silent"), Some(&"wireless:CC".to_string()));
+    }
+
+    #[test]
+    fn dedupe_curve_names_renames_later_duplicates() {
+        let mut config = AppConfig::default();
+        config.fan_curves.push(curve("Silent", &[(20.0, 20.0)]));
+        config.fan_curves.push(curve("Silent", &[(30.0, 30.0)]));
+        config.fan_curves.push(curve("Balanced", &[(40.0, 40.0)]));
+        let mut owners = HashMap::new();
+
+        let renamed = dedupe_curve_names(&mut config, &mut owners);
+
+        assert_eq!(renamed, vec!["Silent (2)".to_string()]);
+        assert_eq!(config.fan_curves[0].name, "Silent");
+        assert_eq!(config.fan_curves[1].name, "Silent (2)");
+        assert_eq!(config.fan_curves[2].name, "Balanced");
+    }
+
+    #[test]
+    fn dedupe_curve_names_updates_fan_group_references() {
+        let mut config = AppConfig::default();
+        config.fan_curves.push(curve("Silent", &[(20.0, 20.0)]));
+        config.fan_curves.push(curve("Silent", &[(30.0, 30.0)]));
+        config.fans = Some(FanConfig { speeds: vec![group("wireless:AA", "Silent")], ..FanConfig::default() });
+        let mut owners = HashMap::new();
+
+        dedupe_curve_names(&mut config, &mut owners);
+
+        // The FanGroup referenced the name "Silent" — after dedup it must
+        // still resolve to *some* real curve, not a name that no longer
+        // exists in `fan_curves`.
+        let referenced = match &config.fans.as_ref().unwrap().speeds[0].speeds[0] {
+            FanSpeed::Curve(name) => name.clone(),
+            _ => panic!("expected a Curve slot"),
+        };
+        assert!(config.fan_curves.iter().any(|c| c.name == referenced));
+    }
+
+    #[test]
+    fn dedupe_curve_names_does_not_strip_the_unrenamed_curves_owner() {
+        // Regression test: the original curve that keeps its name must keep
+        // its existing owner — the renamed duplicate must not steal it.
+        let mut config = AppConfig::default();
+        config.fan_curves.push(curve("Silent", &[(20.0, 20.0)]));
+        config.fan_curves.push(curve("Silent", &[(30.0, 30.0)]));
+        let mut owners = HashMap::new();
+        owners.insert("Silent".to_string(), "wireless:AA".to_string());
+
+        dedupe_curve_names(&mut config, &mut owners);
+
+        assert_eq!(owners.get("Silent"), Some(&"wireless:AA".to_string()));
+    }
+
+    #[test]
+    fn dedupe_curve_names_assigns_renamed_curve_owner_from_its_fan_group() {
+        let mut config = AppConfig::default();
+        config.fan_curves.push(curve("Silent", &[(20.0, 20.0)]));
+        config.fan_curves.push(curve("Silent", &[(30.0, 30.0)]));
+        config.fans = Some(FanConfig { speeds: vec![group("wireless:AA", "Silent")], ..FanConfig::default() });
+        let mut owners = HashMap::new();
+        owners.insert("Silent".to_string(), "wireless:CC".to_string());
+
+        dedupe_curve_names(&mut config, &mut owners);
+
+        // The only FanGroup referencing "Silent" gets redirected to the
+        // renamed duplicate; the pre-existing owner of the unrenamed name
+        // is left untouched rather than being stolen by the duplicate.
+        assert_eq!(owners.get("Silent"), Some(&"wireless:CC".to_string()));
+        assert_eq!(owners.get("Silent (2)"), Some(&"wireless:AA".to_string()));
+    }
+
+    #[test]
+    fn dedupe_curve_names_no_op_when_all_unique() {
+        let mut config = AppConfig::default();
+        config.fan_curves.push(curve("Silent", &[(20.0, 20.0)]));
+        config.fan_curves.push(curve("Balanced", &[(30.0, 30.0)]));
+        let mut owners = HashMap::new();
+
+        let renamed = dedupe_curve_names(&mut config, &mut owners);
+
+        assert!(renamed.is_empty());
+        assert_eq!(config.fan_curves[0].name, "Silent");
+        assert_eq!(config.fan_curves[1].name, "Balanced");
+    }
+
+    #[test]
+    fn graph_plot_rect_subtracts_margins() {
+        let (x0, y0, w, h) = graph_plot_rect(300, 200);
+        assert_eq!((x0, y0), (GRAPH_MARGIN_LEFT, GRAPH_MARGIN_TOP));
+        assert_eq!(w, 300.0 - GRAPH_MARGIN_LEFT - GRAPH_MARGIN_RIGHT);
+        assert_eq!(h, 200.0 - GRAPH_MARGIN_TOP - GRAPH_MARGIN_BOTTOM);
+    }
+
+    #[test]
+    fn graph_plot_rect_never_shrinks_below_1px() {
+        let (_, _, w, h) = graph_plot_rect(1, 1);
+        assert_eq!(w, 1.0);
+        assert_eq!(h, 1.0);
+    }
+
+    #[test]
+    fn graph_to_pixel_and_back_round_trips() {
+        let plot = graph_plot_rect(300, 200);
+        for &(temp, pwm) in &[(0.0, 0.0), (50.0, 50.0), (100.0, 100.0), (30.0, 90.0)] {
+            let (x, y) = graph_to_pixel(temp, pwm, plot);
+            let (t2, p2) = graph_to_data(x, y, plot);
+            assert!((t2 - temp).abs() < 0.01, "temp round-trip: {temp} -> {t2}");
+            assert!((p2 - pwm).abs() < 0.01, "pwm round-trip: {pwm} -> {p2}");
+        }
+    }
+
+    #[test]
+    fn graph_to_pixel_origin_is_bottom_left() {
+        let plot = graph_plot_rect(300, 200);
+        let (x0, y0, _, ph) = plot;
+        // 0°C/0% PWM sits at the plot's bottom-left corner (y is flipped:
+        // pixel-space grows downward, PWM grows upward).
+        let (x, y) = graph_to_pixel(0.0, 0.0, plot);
+        assert_eq!(x, x0);
+        assert_eq!(y, y0 + ph);
+    }
+
+    #[test]
+    fn graph_to_data_clamps_outside_plot_area() {
+        let plot = graph_plot_rect(300, 200);
+        let (x0, y0, pw, ph) = plot;
+        let (temp, pwm) = graph_to_data(x0 - 500.0, y0 - 500.0, plot);
+        assert_eq!(temp, 0.0);
+        assert_eq!(pwm, GRAPH_MAX_PWM);
+        let (temp, pwm) = graph_to_data(x0 + pw + 500.0, y0 + ph + 500.0, plot);
+        assert_eq!(temp, GRAPH_MAX_TEMP);
+        assert_eq!(pwm, 0.0);
+    }
+
+    #[test]
+    fn graph_hit_test_finds_nearest_point_within_radius() {
+        let plot = graph_plot_rect(300, 200);
+        let points = [(20.0, 30.0), (50.0, 60.0), (80.0, 90.0)];
+        let (x, y) = graph_to_pixel(50.0, 60.0, plot);
+        assert_eq!(graph_hit_test(&points, x, y, plot), Some(1));
+        assert_eq!(graph_hit_test(&points, x + 2.0, y + 2.0, plot), Some(1));
+    }
+
+    #[test]
+    fn graph_hit_test_returns_none_outside_hit_radius() {
+        let plot = graph_plot_rect(300, 200);
+        let points = [(20.0, 30.0), (50.0, 60.0)];
+        assert_eq!(graph_hit_test(&points, -1000.0, -1000.0, plot), None);
+    }
 }

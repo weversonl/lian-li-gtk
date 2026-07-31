@@ -21,14 +21,8 @@ pub fn mode_uses_color(mode: lianli_shared::rgb::RgbMode) -> bool {
     !matches!(mode, lianli_shared::rgb::RgbMode::Rainbow | lianli_shared::rgb::RgbMode::RainbowMorph)
 }
 
-/// How many of the 8 color swatches are actually meaningful for `mode`.
-/// Every other color-using mode (Static, Breathing, Direct, ...) only ever
-/// reads `colors[0]` — showing all 8 swatches for those wasn't just visual
-/// clutter, it was misleading, since picking swatches 2-8 silently did
-/// nothing. `ColorCycle` (Gradient Wave) uses all 8; `Meteor` uses 2 (head,
-/// tail); `MeteorShower` (repurposed as a rainbow-headed meteor for wireless
-/// devices — see `apply_edge_frame`'s callers) only needs the tail color,
-/// since the head cycles the hue wheel on its own.
+/// How many of the 8 color swatches are meaningful for `mode` — others only
+/// ever read `colors[0]`, so showing all 8 for those would be misleading.
 pub fn color_count_for_mode(mode: lianli_shared::rgb::RgbMode) -> usize {
     use lianli_shared::rgb::RgbMode;
     match mode {
@@ -171,45 +165,18 @@ pub fn custom_gradient_wave_frames(
         .collect()
 }
 
-/// A bright "head" sweeping once across the strip, dragging a fading trail
-/// behind it and leaving everything else off (or `tail_color`, if not
-/// black) — the classic ARGB "Meteor" effect. `circular` picks the strip's
-/// topology: `false` (a cable with two distinct physical ends) is a one-way
-/// linear sweep — the head starts at one tip, travels to the other, and
-/// only *then* snaps back to the start for the next lap, since blending the
-/// trail across the seam of a strip with real ends (as an earlier version
-/// of this function did for every strip) made the tail flicker at the
-/// wrong end every lap. `true` (a closed ring, e.g. the LEDs around a fan's
-/// hub) wraps the trail seamlessly from the last LED back to the first,
-/// since there they really are physically adjacent. `rainbow_head` cycles
-/// the head's hue over the lap instead of using `head_color` (used to
-/// repurpose `RgbMode::MeteorShower` as a rainbow-headed variant for
-/// wireless devices, same trick as `ColorCycle` → "Gradient Wave").
+/// Classic ARGB "Meteor": a bright head sweeps once across the strip with a
+/// fading trail. `circular` picks topology — `false` is a linear one-way
+/// sweep (tip to tip, then snaps back); `true` wraps the trail seamlessly
+/// (e.g. LEDs around a fan hub). `rainbow_head` cycles the head's hue
+/// instead of `head_color`. Every physical strip (`strip_bounds`) plays in
+/// sync so a multi-strip cable reads as one wave, not a relay — `strip_count`
+/// must match the device's real physical strip count.
 ///
-/// Every physical strip (see `strip_bounds`) plays the identical sweep in
-/// sync, all moving together — this is what actually reads as "one pulse
-/// traveling the cable" for a cable made of several physical strips stacked
-/// end to end: each strip's own point lights up at the same relative
-/// height at the same instant, so the whole set moves as one wave. `strip_count`
-/// must match the device's real physical strip count — setting it to the
-/// wrong number (e.g. 2 on an 8-strip cable) makes only that many
-/// simultaneous points appear instead of matching the real segmentation.
-/// Not a relay where only one strip animates while the rest sit dark (see
-/// `meteor_chase_frames`, "Meteor (Split)").
-///
-/// `pause_frames` appends that many tail-only frames after the sweep
-/// completes, before the sequence loops — L-Connect holds ~5s dark between
-/// laps instead of restarting instantly.
-///
-/// For a linear strip, the head only travels to `t = 1.0` (the far tip),
-/// but the trail behind it is still lit at that point — cutting straight to
-/// `pause_frames` there would chop the fading tail off abruptly instead of
-/// letting it finish fading out. `exit_frames` extra frames let `t` keep
-/// going past 1.0 (or below 0.0 in reverse) at the same speed, so the tail
-/// runs off the far tip and fully fades to `tail_color` before the pause,
-/// instead of ending mid-fade. A closed ring has no such tip to run off of
-/// — by the time the head completes the lap, the trail behind it has
-/// already faded out naturally, so no extra frames are needed there.
+/// `pause_frames` holds the tail dark between laps. `exit_frames` lets a
+/// linear sweep's tail run off the far tip and fully fade before the pause,
+/// instead of getting cut off mid-fade (a closed ring needs no extra frames
+/// since the trail already fades out naturally by lap's end).
 #[allow(clippy::too_many_arguments)]
 pub fn meteor_frames(
     led_count: usize,
@@ -261,31 +228,16 @@ pub fn meteor_frames(
     frames
 }
 
-/// The strip-by-strip Meteor relay: each physical strip (see `strip_bounds`)
-/// takes its turn sweeping a full lap, one at a time, in sequence — a
-/// purple thread passing through one LED strip, then another, then another,
-/// until the last, then restarting from the first — not every strip
-/// sweeping together merged as one like `meteor_frames`. Once the last
-/// strip finishes, `pause_frames` tail-only frames hold before the relay
-/// loops back to the first strip.
+/// Strip-by-strip Meteor relay: each physical strip (`strip_bounds`) takes
+/// its turn sweeping a full lap in sequence, unlike `meteor_frames` where
+/// every strip sweeps together. Same tail-exit/`circular` handling as
+/// `meteor_frames`, applied per strip's turn.
 ///
-/// Same tail-exit handling as `meteor_frames` — each strip's own turn gets
-/// extra frames past `t = 1.0` so its trail fades out fully before handing
-/// off to the next strip, instead of cutting the fade off abruptly. `circular`
-/// has the same meaning as in `meteor_frames` (a closed ring vs. a strip
-/// with two real ends), applied to each strip's own turn.
-///
-/// `frame_count_per_strip` is exactly that — each strip's own share of the
-/// lap, not the whole multi-strip turn's duration. Callers relaying across
-/// several strips (see `meteor_relay_across_devices`) divide their target
-/// turn length by the strip count before passing it in here, so a 3-fan
-/// hub's entire turn still totals the same length as a 1-strip device's.
-///
-/// `reverse` flips both the sweep direction *within* each strip's turn
-/// and which end of the assembly the relay starts from — e.g. wired
-/// fan-1→fan-2→fan-3 physically left-to-right, `reverse` runs the whole
-/// chase fan-3→fan-2→fan-1 instead, so the visible relay direction
-/// matches the direction setting instead of only the in-place sweep.
+/// `frame_count_per_strip` is each strip's own share of the lap — callers
+/// relaying across several strips divide their target turn length by strip
+/// count first, so a 3-fan hub's whole turn still matches a 1-strip
+/// device's. `reverse` flips both the in-strip sweep direction and which
+/// end of the assembly the relay starts from.
 #[allow(clippy::too_many_arguments)]
 pub fn meteor_chase_frames(
     led_count: usize,
@@ -340,26 +292,19 @@ pub fn meteor_chase_frames(
     frames
 }
 
-/// Where LED `local_index` (0-based within its own `led_count`-LED ring)
-/// sits on the fan assembly's horizontal axis, as a fraction of one fan's
-/// width (`0.0` = left edge, `1.0` = right edge). `offset_deg` is the real
-/// physical clock position of `local_index == 0` (0 = 12 o'clock, -90 = 9
-/// o'clock, ...) — fans of the identical model can be screwed into a hub at
-/// a different rotation, so this isn't a fixed assumption, it's per-device
-/// (see `DeviceRgbPrefs::ring_offset_deg`). LEDs on the top and bottom half
-/// of the ring that sit at the same horizontal position get (almost) the
-/// same value, since `sin` is symmetric across the vertical axis.
+/// Horizontal position of LED `local_index` on its fan ring, as a fraction
+/// of the fan's width (`0.0`=left, `1.0`=right). `offset_deg` is the real
+/// clock position of `local_index == 0` (0 = 12 o'clock) — fans can be
+/// mounted at different rotations, so this is per-device, not assumed
+/// (see `DeviceRgbPrefs::ring_offset_deg`).
 fn ring_horizontal_fraction(local_index: usize, led_count: usize, offset_deg: f32) -> f32 {
     let angle = std::f32::consts::TAU * local_index as f32 / led_count.max(1) as f32 + offset_deg.to_radians();
     (angle.sin() + 1.0) / 2.0
 }
 
 /// Each LED's position on the whole assembly's horizontal axis, in
-/// fan-widths (`0.0` = left edge of the first fan, `zone_led_counts.len()`
-/// = right edge of the last) — `None` for LEDs past the last real fan (a
-/// hub's unpopulated extra zone, e.g. a 4-port hub with only 3 fans wired
-/// in, has no physical LEDs there at all). `ring_offset_deg` calibrates the
-/// physical mount rotation for this device — see `ring_horizontal_fraction`.
+/// fan-widths. `None` for LEDs past the last real fan (an unpopulated hub
+/// port with no physical LEDs).
 fn band_positions(total_led_count: usize, zone_led_counts: &[usize], ring_offset_deg: f32) -> Vec<Option<f32>> {
     let mut positions = vec![None; total_led_count];
     let mut offset = 0usize;
@@ -383,25 +328,16 @@ const BAND_FRONT_WIDTH: f32 = 0.35;
 /// long and gradual, per "saída gradual, sem apagar repentinamente".
 const BAND_BACK_WIDTH: f32 = 0.85;
 
-/// A wide, physically continuous band of light sweeping once across an
-/// entire multi-fan assembly — entering at the first fan's edge, crossing
-/// fan-to-fan (with both fans lit where the band straddles the seam between
-/// them), and exiting past the last fan before a dark pause and restart.
+/// A wide, physically continuous band of light sweeping once across a
+/// whole multi-fan assembly, crossing fan-to-fan rather than restarting
+/// per fan like `meteor_chase_frames` — every fan's ring is treated as one
+/// horizontal surface (`band_positions`), so brightness follows real
+/// physical position, not flat buffer index.
 ///
-/// Unlike `meteor_chase_frames` (which treats each fan as a separate lap,
-/// one at a time, jumping back to the start of the next), this treats every
-/// fan's ring as *one* physical horizontal surface (see `band_positions`) —
-/// a LED's brightness depends on its real position on that axis, not its
-/// index in the flat buffer, so the band crosses smoothly instead of
-/// visibly restarting or "orbiting" each fan's ring individually.
-///
-/// The band peaks at exactly `band_color` at its center — no separate
-/// forced-white core — with a short sharp leading edge and a long gradual
-/// trailing tail (asymmetric falloff, unlike `meteor_frames`' symmetric
-/// tail), fading to `background_color` (the user's own configured tail/rest
-/// color) outside the band, same as every other meteor variant. `zone_led_counts`
-/// must be only the *real* physical fans (e.g. 3 entries even if the hub's
-/// own `total_led_count` covers a 4th unpopulated port) — see `band_positions`.
+/// Peaks at exactly `band_color`, no forced-white core; asymmetric falloff
+/// (short sharp leading edge, long gradual tail), unlike `meteor_frames`'
+/// symmetric tail. `zone_led_counts` must be only the real physical fans —
+/// see `band_positions`.
 #[allow(clippy::too_many_arguments)]
 pub fn meteor_band_frames(
     total_led_count: usize,
@@ -534,32 +470,18 @@ pub fn rainbow_wave_frames(
     per_device
 }
 
-/// The L-Connect-style Meteor relay carried across *devices* instead of
-/// physical strips within one device: each device takes its full turn, in
-/// the order given, before handing off to the next — fans first, then the
-/// GPU Strimer, then the motherboard Strimer, then back to the fans,
-/// matching whatever device order the user set on this page. Once every
-/// device has had a turn, `pause_frames` holds everything dark before the
-/// relay loops back to the first device.
+/// Meteor relay carried across *devices*: each takes its full turn, in
+/// order, before handing off to the next; `pause_frames` holds dark before
+/// looping back to the first.
 ///
-/// A device's own turn uses `meteor_band_frames` when `device_chase[i]` is
-/// set — that's for multi-fan hubs, where a wide band of light physically
-/// sweeps fan-to-fan across the hub (see `meteor_band_frames`), using each
-/// device's real per-fan zone sizes from `device_zone_led_counts[i]`.
-/// Devices with `device_chase[i]` false (e.g. a Strimer cable, where
-/// `device_strip_counts[i]` counts physical wire strands rather than
-/// separate visible units) instead use `meteor_frames`, so its strands stay
-/// synced and its own turn reads as one solid pulse along the whole cable —
-/// chasing strand-by-strand there looked like the cable lighting up one
-/// thin wire at a time instead of the whole LED. Pass `has_fan` from each
-/// device's `DeviceInfo` for `device_chase`.
+/// A device's turn uses `meteor_band_frames` when `device_chase[i]` is set
+/// (multi-fan hubs — band sweeps fan-to-fan). Otherwise (e.g. a Strimer
+/// cable) uses `meteor_frames`, since chasing strand-by-strand there looked
+/// like lighting one thin wire at a time. Pass `has_fan` for `device_chase`.
 ///
-/// All returned sequences share the same total length so every device can
-/// be sent with the same `interval_ms` and stay in step — while it's not
-/// this device's turn, its sequence is just solid `tail_color`.
-/// `device_reversed`/`device_strip_counts`/`device_circular` are each
-/// device's own settings (from `DeviceRgbPrefs`), applied only to that
-/// device's own turn — they don't affect which device goes first.
+/// All sequences share the same total length so every device stays in
+/// step with one `interval_ms` — outside its own turn, a device's sequence
+/// is just solid `tail_color`.
 #[allow(clippy::too_many_arguments)]
 pub fn meteor_relay_across_devices(
     device_led_counts: &[usize],
@@ -749,4 +671,291 @@ pub fn identify_frames(led_count: usize) -> Vec<Vec<[u8; 3]>> {
         .into_iter()
         .map(|color| vec![color; led_count])
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_to_speed4_clamps_to_0_4() {
+        assert_eq!(percent_to_speed4(0.0), 0);
+        assert_eq!(percent_to_speed4(100.0), 4);
+        assert_eq!(percent_to_speed4(50.0), 2);
+        assert_eq!(percent_to_speed4(-10.0), 0);
+        assert_eq!(percent_to_speed4(1000.0), 4);
+    }
+
+    #[test]
+    fn percent_to_cycle_ms_bounds() {
+        assert_eq!(percent_to_cycle_ms(0.0), 6000.0);
+        assert_eq!(percent_to_cycle_ms(100.0), 900.0);
+        assert!(percent_to_cycle_ms(-50.0) == 6000.0); // clamped
+        assert!(percent_to_cycle_ms(150.0) == 900.0); // clamped
+    }
+
+    #[test]
+    fn fps_to_interval_ms_floors_at_8ms() {
+        assert_eq!(fps_to_interval_ms(1000.0), 8);
+        assert_eq!(fps_to_interval_ms(10.0), 100);
+    }
+
+    #[test]
+    fn frame_count_for_is_clamped() {
+        assert_eq!(frame_count_for(1.0, 100.0), 4); // would be < 4 unclamped
+        assert_eq!(frame_count_for(1000.0, 100_000.0), 200); // would be > 200 unclamped
+    }
+
+    #[test]
+    fn meteor_pause_frames_zero_when_no_pause() {
+        assert_eq!(meteor_pause_frames(20, 0.0), 0);
+        assert_eq!(meteor_pause_frames(20, -1.0), 0);
+        assert_eq!(meteor_pause_frames(1000, 2.0), 2);
+    }
+
+    #[test]
+    fn scale_color_clamps_factor() {
+        assert_eq!(scale_color([200, 100, 50], 0.5), [100, 50, 25]);
+        assert_eq!(scale_color([10, 20, 30], -1.0), [0, 0, 0]);
+        assert_eq!(scale_color([10, 20, 30], 2.0), [10, 20, 30]);
+    }
+
+    #[test]
+    fn hsv_to_rgb_primary_hues() {
+        assert_eq!(hsv_to_rgb(0.0, 1.0, 1.0), [255, 0, 0]);
+        assert_eq!(hsv_to_rgb(1.0 / 3.0, 1.0, 1.0), [0, 255, 0]);
+        assert_eq!(hsv_to_rgb(2.0 / 3.0, 1.0, 1.0), [0, 0, 255]);
+    }
+
+    #[test]
+    fn wrap01_stays_in_range() {
+        assert_eq!(wrap01(0.5), 0.5);
+        assert!((wrap01(1.5) - 0.5).abs() < 1e-6);
+        assert!((wrap01(-0.25) - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn strip_bounds_splits_evenly() {
+        assert_eq!(strip_bounds(90, 3), vec![0, 30, 60, 90]);
+        assert_eq!(strip_bounds(10, 1), vec![0, 10]);
+        // strip_count clamped to at most led_count.
+        assert_eq!(strip_bounds(2, 5).len(), 3);
+    }
+
+    #[test]
+    fn strip_position_is_fraction_within_own_strip() {
+        let bounds = strip_bounds(30, 3); // [0, 10, 20, 30]
+        assert_eq!(strip_position(&bounds, 0), 0.0);
+        assert_eq!(strip_position(&bounds, 10), 0.0); // start of 2nd strip
+        assert!((strip_position(&bounds, 15) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ring_horizontal_fraction_at_default_offset() {
+        // local_index 0 with no offset sits at angle 0 (12 o'clock),
+        // whose horizontal (sin) position is the ring's midline.
+        assert!((ring_horizontal_fraction(0, 4, 0.0) - 0.5).abs() < 1e-6);
+        // A quarter turn (index 1 of 4) sits at the horizontal extreme.
+        assert!((ring_horizontal_fraction(1, 4, 0.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn band_positions_marks_unpopulated_leds_as_none() {
+        // 2 fans of 3 LEDs each, but the buffer has room for a 3rd
+        // (unpopulated) fan's worth of LEDs.
+        let positions = band_positions(9, &[3, 3], 0.0);
+        assert!(positions[0].is_some());
+        assert!(positions[5].is_some());
+        assert!(positions[6].is_none());
+        assert!(positions[8].is_none());
+        // Second fan's LEDs land in [1.0, 2.0).
+        assert!(positions[3].unwrap() >= 1.0 && positions[3].unwrap() < 2.0);
+    }
+
+    #[test]
+    fn meteor_frames_head_is_at_start_on_first_frame() {
+        let frames = meteor_frames(10, 20, 5, [255, 0, 0], [0, 0, 0], false, false, 1, false, 1.0);
+        // frame_count (+ exit_frames for a non-circular strip) + pause_frames.
+        assert!(frames.len() > 20 + 5);
+        // At t=0 the head sits exactly on LED 0.
+        assert_eq!(frames[0][0], [255, 0, 0]);
+        // The last `pause_frames` frames are solid tail color.
+        let last = frames.last().unwrap();
+        assert!(last.iter().all(|&c| c == [0, 0, 0]));
+    }
+
+    #[test]
+    fn meteor_frames_pause_frames_are_appended_exactly() {
+        let with_pause = meteor_frames(5, 10, 7, [255, 255, 255], [0, 0, 0], false, false, 1, true, 1.0);
+        let without_pause = meteor_frames(5, 10, 0, [255, 255, 255], [0, 0, 0], false, false, 1, true, 1.0);
+        assert_eq!(with_pause.len(), without_pause.len() + 7);
+    }
+
+    #[test]
+    fn meteor_band_frames_length_includes_pause() {
+        let frames = meteor_band_frames(9, &[3, 3, 3], 0.0, 16, 4, [255, 255, 255], [0, 0, 0], false, 1.0);
+        assert_eq!(frames.len(), 16 + 4);
+        // Pause tail is solid background.
+        assert!(frames.last().unwrap().iter().all(|&c| c == [0, 0, 0]));
+    }
+
+    #[test]
+    fn stagger_across_devices_pads_other_devices_dark() {
+        let own_turns = vec![vec![vec![[1, 1, 1]; 2]; 3], vec![vec![[2, 2, 2]; 2]; 3]];
+        let led_counts = [2, 2];
+        let staggered = stagger_across_devices(&own_turns, &led_counts, 2, [0, 0, 0]);
+        assert_eq!(staggered.len(), 2);
+        // Device 0's own turn (frames 0..3) is its real color; device 1's
+        // window (frames 3..6) is padded dark; plus 2 pause frames.
+        assert_eq!(staggered[0].len(), 3 + 3 + 2);
+        assert_eq!(staggered[0][0], vec![[1, 1, 1]; 2]);
+        assert_eq!(staggered[0][3], vec![[0, 0, 0]; 2]);
+        assert_eq!(staggered[0][6], vec![[0, 0, 0]; 2]); // pause frame
+    }
+
+    #[test]
+    fn rainbow_wave_frames_handles_zero_total_leds() {
+        let result = rainbow_wave_frames(&[0, 0], 10, false, &[false, false], &[1, 1], 1.0);
+        assert_eq!(result, vec![Vec::<Vec<[u8; 3]>>::new(), Vec::new()]);
+    }
+
+    #[test]
+    fn mode_uses_color_excludes_rainbow_modes() {
+        use lianli_shared::rgb::RgbMode;
+        assert!(!mode_uses_color(RgbMode::Rainbow));
+        assert!(!mode_uses_color(RgbMode::RainbowMorph));
+        assert!(mode_uses_color(RgbMode::Static));
+        assert!(mode_uses_color(RgbMode::Meteor));
+    }
+
+    #[test]
+    fn color_count_for_mode_matches_ui_swatches() {
+        use lianli_shared::rgb::RgbMode;
+        assert_eq!(color_count_for_mode(RgbMode::ColorCycle), 8);
+        assert_eq!(color_count_for_mode(RgbMode::Meteor), 2);
+        assert_eq!(color_count_for_mode(RgbMode::Runway), 2);
+        assert_eq!(color_count_for_mode(RgbMode::Static), 1);
+    }
+
+    #[test]
+    fn percent_to_brightness4_matches_speed4() {
+        assert_eq!(percent_to_brightness4(0.0), percent_to_speed4(0.0));
+        assert_eq!(percent_to_brightness4(75.0), percent_to_speed4(75.0));
+    }
+
+    #[test]
+    fn lerp_color_endpoints_and_midpoint() {
+        assert_eq!(lerp_color([0, 0, 0], [200, 100, 50], 0.0), [0, 0, 0]);
+        assert_eq!(lerp_color([0, 0, 0], [200, 100, 50], 1.0), [200, 100, 50]);
+        assert_eq!(lerp_color([0, 0, 0], [200, 100, 50], 0.5), [100, 50, 25]);
+        // Out-of-range t is clamped.
+        assert_eq!(lerp_color([0, 0, 0], [200, 100, 50], 2.0), [200, 100, 50]);
+    }
+
+    #[test]
+    fn sample_gradient_picks_exact_stops_and_blends_between() {
+        let colors = [[255, 0, 0], [0, 255, 0], [0, 0, 255]];
+        assert_eq!(sample_gradient(&colors, 0.0), [255, 0, 0]);
+        // t wraps into [0, 1) — 1.0 wraps back to the first stop, not the last.
+        assert_eq!(sample_gradient(&colors, 1.0), [255, 0, 0]);
+        // Just under 1.0 is still essentially the last stop.
+        assert_eq!(sample_gradient(&colors, 0.999), [0, 1, 254]);
+        // Halfway between stop 0 and stop 1 (t=0.25 of the whole gradient).
+        assert_eq!(sample_gradient(&colors, 0.25), [128, 128, 0]);
+    }
+
+    #[test]
+    fn sample_gradient_single_color_is_constant() {
+        assert_eq!(sample_gradient(&[[1, 2, 3]], 0.5), [1, 2, 3]);
+        assert_eq!(sample_gradient(&[], 0.5), [0, 0, 0]);
+    }
+
+    #[test]
+    fn rainbow_frames_frame_count_and_led_count() {
+        let frames = rainbow_frames(12, 8, false, 1, 1.0);
+        assert_eq!(frames.len(), 8);
+        assert_eq!(frames[0].len(), 12);
+    }
+
+    #[test]
+    fn custom_gradient_wave_frames_uses_gradient_colors() {
+        let frames = custom_gradient_wave_frames(4, 5, &[[255, 0, 0], [0, 0, 255]], false, 1, 1.0);
+        assert_eq!(frames.len(), 5);
+        assert_eq!(frames[0].len(), 4);
+    }
+
+    #[test]
+    fn meteor_chase_frames_relays_one_strip_at_a_time() {
+        // 2 strips of 5 LEDs; only one strip should ever be lit per frame.
+        let frames = meteor_chase_frames(10, 8, 0, [255, 255, 255], [0, 0, 0], false, false, 2, false, 1.0);
+        for frame in &frames {
+            let first_half_lit = frame[0..5].iter().any(|&c| c != [0, 0, 0]);
+            let second_half_lit = frame[5..10].iter().any(|&c| c != [0, 0, 0]);
+            assert!(!(first_half_lit && second_half_lit), "both strips lit in the same frame");
+        }
+    }
+
+    #[test]
+    fn meteor_chase_frames_pause_frames_are_appended() {
+        let with_pause = meteor_chase_frames(6, 5, 3, [255, 255, 255], [0, 0, 0], false, false, 1, true, 1.0);
+        let without_pause = meteor_chase_frames(6, 5, 0, [255, 255, 255], [0, 0, 0], false, false, 1, true, 1.0);
+        assert_eq!(with_pause.len(), without_pause.len() + 3);
+    }
+
+    #[test]
+    fn meteor_relay_across_devices_shares_total_length() {
+        let led_counts = [6, 6];
+        let zone_counts = vec![vec![3, 3], vec![6]];
+        let frames = meteor_relay_across_devices(
+            &led_counts,
+            &zone_counts,
+            10,
+            2,
+            [255, 255, 255],
+            [0, 0, 0],
+            false,
+            &[false, false],
+            &[1, 1],
+            &[false, false],
+            &[true, false],
+            &[0.0, 0.0],
+            1.0,
+        );
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].len(), frames[1].len());
+    }
+
+    #[test]
+    fn apply_edge_frame_colors_only_the_edges() {
+        let mut frame = [[0, 0, 0]; 10];
+        let source = [[9, 9, 9]; 10];
+        apply_edge_frame(&mut frame, &source, 1, 2, true, true);
+        assert_eq!(frame[0], [9, 9, 9]);
+        assert_eq!(frame[1], [9, 9, 9]);
+        assert_eq!(frame[2], [0, 0, 0]); // middle untouched
+        assert_eq!(frame[9], [9, 9, 9]);
+        assert_eq!(frame[8], [9, 9, 9]);
+    }
+
+    #[test]
+    fn apply_edge_strips_frame_colors_whole_outer_strips() {
+        // 4 strips of 3 LEDs each; color the outermost strip on each end.
+        let mut frame = [[0, 0, 0]; 12];
+        let source = [[9, 9, 9]; 12];
+        apply_edge_strips_frame(&mut frame, &source, 4, 1, true, true);
+        assert!(frame[0..3].iter().all(|&c| c == [9, 9, 9]));
+        assert!(frame[3..9].iter().all(|&c| c == [0, 0, 0])); // untouched middle strips
+        assert!(frame[9..12].iter().all(|&c| c == [9, 9, 9]));
+    }
+
+    #[test]
+    fn identify_frames_blinks_3_times_ending_off() {
+        let frames = identify_frames(5);
+        assert_eq!(frames.len(), 7);
+        assert_eq!(frames[0][0], [0, 0, 0]);
+        assert_eq!(frames.last().unwrap()[0], [0, 0, 0]);
+        let yellow = frames[1][0];
+        assert_eq!(yellow, [63, 63, 0]);
+        assert!(frames.iter().all(|f| f.len() == 5));
+    }
 }

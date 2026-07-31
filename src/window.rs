@@ -964,3 +964,37 @@ fn load_app_css() {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_cable_family_matches_rgb_only_families() {
+        assert!(is_cable_family(DeviceFamily::WirelessStrimer));
+        assert!(is_cable_family(DeviceFamily::WirelessLc217));
+        assert!(is_cable_family(DeviceFamily::WirelessLed88));
+        assert!(is_cable_family(DeviceFamily::StrimerPlus));
+        assert!(is_cable_family(DeviceFamily::UniversalScreenLighting));
+    }
+
+    #[test]
+    fn is_cable_family_excludes_fan_and_lcd_families() {
+        assert!(!is_cable_family(DeviceFamily::Ene6k77));
+        assert!(!is_cable_family(DeviceFamily::TlFan));
+        assert!(!is_cable_family(DeviceFamily::WirelessAio));
+        assert!(!is_cable_family(DeviceFamily::HydroShift2Lcd));
+    }
+
+    #[test]
+    fn humanize_family_splits_on_uppercase_boundaries() {
+        assert_eq!(humanize_family(DeviceFamily::Ene6k77), "Ene6k77");
+        assert_eq!(humanize_family(DeviceFamily::WirelessStrimer), "Wireless Strimer");
+        assert_eq!(humanize_family(DeviceFamily::HydroShift2LcdDesktop), "Hydro Shift2 Lcd Desktop");
+    }
+
+    #[test]
+    fn humanize_family_single_word_variant_is_unchanged() {
+        assert_eq!(humanize_family(DeviceFamily::Slv3Lcd), "Slv3 Lcd");
+    }
+}

@@ -11,22 +11,15 @@ pub struct DeviceRgbPrefs {
     pub direction: RgbDirection,
     pub strip_count: usize,
     /// Flips the rendered wave direction on top of `direction` — some
-    /// devices (seen on a fan hub) have their physical LED wiring order
-    /// reversed relative to what the direction label implies, so this
-    /// corrects it per device instead of making the user pick the opposite
-    /// label from what they mean.
+    /// devices have their physical LED wiring order reversed.
     #[serde(default)]
     pub invert_direction: bool,
-    /// Whether Meteor treats the strip as a closed ring (wraps seamlessly,
-    /// e.g. the LED ring around a fan's hub) instead of a strip with two
-    /// real physical ends (e.g. a Strimer cable) — see `meteor_frames`.
+    /// Whether Meteor treats the strip as a closed ring (wraps seamlessly)
+    /// vs. two real physical ends — see `meteor_frames`.
     #[serde(default)]
     pub meteor_circular: bool,
-    /// Physical mount rotation of this device's fan ring(s), in degrees,
-    /// where 0 means local LED index 0 sits at 12 o'clock (the common
-    /// default) — see `effects::band_positions`. Fans of the identical
-    /// model can still be screwed in at a different rotation per hub, so
-    /// this is calibrated per device rather than assumed from the model.
+    /// Physical mount rotation of this device's fan ring(s), in degrees;
+    /// 0 = local LED index 0 at 12 o'clock — see `effects::band_positions`.
     #[serde(default)]
     pub ring_offset_deg: f64,
 }

@@ -579,3 +579,50 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         _ => "",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// Every En match arm must have a matching PtBr one and vice versa —
+    /// parses this file's own source rather than hardcoding a key list, so
+    /// it stays correct as keys are added.
+    fn keys_for(source: &str, variant: &str) -> HashSet<String> {
+        let needle = format!("Lang::{variant}, \"");
+        source
+            .match_indices(&needle)
+            .filter_map(|(i, _)| {
+                let rest = &source[i + needle.len()..];
+                rest.find('"').map(|end| rest[..end].to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_key_is_translated_in_both_languages() {
+        let source = include_str!("i18n.rs");
+        let en_keys = keys_for(source, "En");
+        let pt_keys = keys_for(source, "PtBr");
+
+        assert!(!en_keys.is_empty(), "no En keys found — parser broke");
+
+        let missing_pt: Vec<&String> = en_keys.difference(&pt_keys).collect();
+        assert!(missing_pt.is_empty(), "keys with En but no PtBr translation: {missing_pt:?}");
+
+        let missing_en: Vec<&String> = pt_keys.difference(&en_keys).collect();
+        assert!(missing_en.is_empty(), "keys with PtBr but no En translation: {missing_en:?}");
+    }
+
+    #[test]
+    fn known_key_resolves_in_both_languages() {
+        assert_eq!(t(Lang::En, "sidebar.title"), "Devices");
+        assert_eq!(t(Lang::PtBr, "sidebar.title"), "Dispositivos");
+    }
+
+    #[test]
+    fn unknown_key_falls_back_to_empty_string() {
+        assert_eq!(t(Lang::En, "does.not.exist"), "");
+        assert_eq!(t(Lang::PtBr, "does.not.exist"), "");
+    }
+}

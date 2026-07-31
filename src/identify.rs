@@ -98,39 +98,11 @@ async fn reapply_last_effect_inner(ctx: &Rc<Ctx>, device_id: &str, notify_on_fai
     }
 }
 
-/// Guards against the firmware silently resetting a wireless device's
-/// lighting to its factory default (seen as a brief white flash, then
-/// Rainbow) without ever actually dropping from `ListDevices` — since
-/// nothing disappears from the device list, `start_polling`'s reconnect
-/// diffing never fires, and a whole-device `SetRgbFrames` animation (looped
-/// on the device itself, sent only once) is lost for good. Periodically
-/// re-sending it bounds how long a glitch like that can last, instead of
-/// requiring the user to notice and manually reapply. Segments are excluded
-/// since that feature already re-sends its own frames continuously via a
-/// live client-side loop (see `pages::rgb_editor::apply_segments`) and self-heals
-/// on its own; re-triggering it here would just restart it for no reason.
-///
-/// A cross-device "Sincronizar Efeito" relay (see
-/// `global_effects::stagger_across_devices`) has its phase baked into each
-/// device's own frame buffer — every device restarts at frame 0 of an
-/// identical-length loop, so they need to restart at (approximately) the
-/// same instant to stay in relay lockstep. A few hundred ms of stagger
-/// between devices only costs a small, self-correcting phase skew each
-/// cycle (it never accumulates, since the next heartbeat resyncs from
-/// frame 0 again) — firing every device's resend truly concurrently instead
-/// hits the shared RF dongle with several large animation uploads at once,
-/// which was observed to collide with the once-a-second master-clock
-/// heartbeat (`fan_controller`) badly enough to cause real wireless
-/// disconnect/reconnect flicker and fans briefly stalling. Staggering is
-/// the safer trade. Confirmed live: with 4 wireless devices all running a
-/// heavy Meteor Relay animation (940 frames each), a merely-staggered
-/// (delay-then-fire, not delay-then-wait) concurrent resend still let
-/// transfers overlap on the shared RF dongle badly enough to cause real
-/// fan stalls and RGB flicker — a single-device animation alone was rock
-/// solid. Each `SetRgbFrames` IPC call only returns once the daemon has
-/// finished writing that device's whole chunked RF transfer, so awaiting
-/// them one at a time (not spawning them) is what actually guarantees no
-/// overlap, regardless of how long any single transfer takes.
+/// Guards against the firmware silently resetting a device's lighting to
+/// factory default without dropping from `ListDevices`. Segments excluded
+/// (self-heals via its own live loop). Devices are re-sent sequentially,
+/// not concurrently — parallel sends to all 4 wireless devices saturated
+/// the shared RF dongle and caused real fan stalls/RGB flicker.
 const HEARTBEAT_SECS: u64 = 20;
 
 pub fn spawn_frame_heartbeat(ctx: &Rc<Ctx>) {

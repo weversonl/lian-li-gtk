@@ -44,14 +44,10 @@ const WIRELESS_ANIMATED_MODES: [RgbMode; 7] = [
 
 /// `MeteorShower` and `Runway` are repurposed here for wireless devices,
 /// same trick as `ColorCycle` → "Gradient Wave": on a multi-fan hub,
-/// `Meteor` renders a physically-accurate band crossing each fan
-/// (`meteor_band_frames`); on any other device (e.g. a Strimer cable) it
-/// merges every physical strip into one continuous meteor (`meteor_frames`)
-/// instead, same as before. `MeteorShower` is the latter's rainbow-headed
-/// variant. `Runway` keeps the older every-strip-in-sync rendering
-/// (`meteor_frames`) always, even on a fan hub, for whoever prefers that
-/// look over the band-crossing default. A real wired device with genuine
-/// native support for any of these three is unaffected.
+/// `Meteor` band-crosses each fan (`meteor_band_frames`); on other devices
+/// it merges strips into one meteor (`meteor_frames`). `MeteorShower` is
+/// the rainbow-headed variant; `Runway` keeps the older every-strip-in-sync
+/// look always. Wired devices with real native support are unaffected.
 fn effect_mode_label(mode: RgbMode, is_wireless: bool) -> &'static str {
     if is_wireless && mode == RgbMode::ColorCycle {
         "Gradient Wave"
@@ -1771,5 +1767,112 @@ pub(crate) async fn apply_segments(
             i += 1;
             glib::timeout_future(interval).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn caps(device_id: &str, zone_leds: &[u16]) -> RgbDeviceCapabilities {
+        RgbDeviceCapabilities {
+            device_id: device_id.to_string(),
+            device_name: String::new(),
+            supported_modes: Vec::new(),
+            zones: zone_leds.iter().map(|&led_count| lianli_shared::rgb::RgbZoneInfo {
+                name: String::new(),
+                led_count,
+            }).collect(),
+            supports_direct: false,
+            supports_mb_rgb_sync: false,
+            total_led_count: zone_leds.iter().sum(),
+            supported_scopes: Vec::new(),
+            supports_direction: false,
+        }
+    }
+
+    #[test]
+    fn effect_mode_label_repurposed_only_when_wireless() {
+        assert_eq!(effect_mode_label(RgbMode::ColorCycle, true), "Gradient Wave");
+        assert_eq!(effect_mode_label(RgbMode::ColorCycle, false), RgbMode::ColorCycle.display_name());
+        assert_eq!(effect_mode_label(RgbMode::MeteorShower, true), "Meteor (Rainbow)");
+        assert_eq!(effect_mode_label(RgbMode::Runway, true), "Meteor (Synced)");
+        assert_eq!(effect_mode_label(RgbMode::Runway, false), RgbMode::Runway.display_name());
+    }
+
+    #[test]
+    fn is_meteor_mode_matches_meteor_family_only() {
+        assert!(is_meteor_mode(RgbMode::Meteor));
+        assert!(is_meteor_mode(RgbMode::MeteorShower));
+        assert!(is_meteor_mode(RgbMode::Runway));
+        assert!(!is_meteor_mode(RgbMode::Rainbow));
+        assert!(!is_meteor_mode(RgbMode::Static));
+    }
+
+    #[test]
+    fn fan_zone_led_counts_truncates_to_strip_count() {
+        let caps = vec![caps("wireless:AA", &[10, 20, 30, 40])];
+        assert_eq!(fan_zone_led_counts("wireless:AA", &caps, 2), vec![10, 20]);
+    }
+
+    #[test]
+    fn fan_zone_led_counts_missing_device_is_empty() {
+        let caps = vec![caps("wireless:AA", &[10, 20])];
+        assert_eq!(fan_zone_led_counts("wireless:BB", &caps, 2), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn render_side_frames_solid_scales_by_brightness() {
+        let frames = render_side_frames(
+            MiddleKind::Solid, [200, 100, 50], RgbMode::Static, [[0; 3]; 8], 50.0, 4, 3, 0, false, 1, false,
+        );
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].len(), 4);
+        assert_eq!(frames[0][0], [100, 50, 25]);
+    }
+
+    #[test]
+    fn render_side_frames_effect_mode_renders_multiple_frames() {
+        let frames = render_side_frames(
+            MiddleKind::Effect, [0; 3], RgbMode::Breathing, [[255, 0, 0]; 8], 100.0, 4, 5, 0, false, 1, false,
+        );
+        assert_eq!(frames.len(), 5);
+        for frame in &frames {
+            assert_eq!(frame.len(), 4);
+        }
+    }
+
+    #[test]
+    fn render_side_frames_effect_unsupported_mode_falls_back_to_solid_color() {
+        let frames = render_side_frames(
+            MiddleKind::Effect, [10, 20, 30], RgbMode::Direct, [[0; 3]; 8], 100.0, 3, 5, 0, false, 1, false,
+        );
+        assert_eq!(frames, vec![vec![[10, 20, 30]; 3]]);
+    }
+
+    #[test]
+    fn combine_edge_middle_frames_length_is_the_longer_sequence() {
+        let middle = vec![vec![[1, 1, 1]; 4]];
+        let edge = vec![vec![[2, 2, 2]; 4], vec![[3, 3, 3]; 4], vec![[4, 4, 4]; 4]];
+
+        let combined = combine_edge_middle_frames(&middle, &edge, false, 1, 1, true, false);
+
+        assert_eq!(combined.len(), 3);
+    }
+
+    #[test]
+    fn combine_edge_middle_frames_wraps_the_shorter_sequence() {
+        let middle = vec![vec![[9, 9, 9]; 4], vec![[8, 8, 8]; 4]];
+        let edge = vec![vec![[1, 1, 1]; 4]];
+
+        let combined = combine_edge_middle_frames(&middle, &edge, false, 1, 1, true, false);
+
+        assert_eq!(combined.len(), 2);
+        // Both frames borrow the same (only) edge frame's color at index 0.
+        assert_eq!(combined[0][0], [1, 1, 1]);
+        assert_eq!(combined[1][0], [1, 1, 1]);
+        // The rest of the middle frame is left untouched.
+        assert_eq!(combined[0][3], [9, 9, 9]);
+        assert_eq!(combined[1][3], [8, 8, 8]);
     }
 }

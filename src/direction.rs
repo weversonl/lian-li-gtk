@@ -46,3 +46,48 @@ pub const WAVE_DIRECTIONS: [RgbDirection; 4] = [
 pub fn wave_direction_label(d: RgbDirection, lang: Lang) -> &'static str {
     direction_label(d, lang)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_reverse_matches_backward_directions() {
+        assert!(is_reverse(RgbDirection::CounterClockwise));
+        assert!(is_reverse(RgbDirection::Down));
+        assert!(is_reverse(RgbDirection::Gather));
+        assert!(!is_reverse(RgbDirection::Clockwise));
+        assert!(!is_reverse(RgbDirection::Up));
+        assert!(!is_reverse(RgbDirection::Spread));
+    }
+
+    #[test]
+    fn effective_reverse_xors_with_invert_flag() {
+        assert!(!effective_reverse(RgbDirection::Clockwise, false));
+        assert!(effective_reverse(RgbDirection::Clockwise, true));
+        assert!(effective_reverse(RgbDirection::CounterClockwise, false));
+        assert!(!effective_reverse(RgbDirection::CounterClockwise, true));
+    }
+
+    #[test]
+    fn direction_label_cw_ccw_are_not_translated() {
+        assert_eq!(direction_label(RgbDirection::Clockwise, Lang::En), "CW");
+        assert_eq!(direction_label(RgbDirection::Clockwise, Lang::PtBr), "CW");
+        assert_eq!(direction_label(RgbDirection::CounterClockwise, Lang::En), "CCW");
+    }
+
+    #[test]
+    fn direction_label_covers_every_direction_in_both_languages() {
+        for &d in ALL_DIRECTIONS.iter() {
+            assert!(!direction_label(d, Lang::En).is_empty(), "missing En label for {d:?}");
+            assert!(!direction_label(d, Lang::PtBr).is_empty(), "missing PtBr label for {d:?}");
+        }
+    }
+
+    #[test]
+    fn wave_directions_is_a_subset_of_all_directions() {
+        for &d in WAVE_DIRECTIONS.iter() {
+            assert!(ALL_DIRECTIONS.contains(&d));
+        }
+    }
+}

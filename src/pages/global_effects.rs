@@ -37,20 +37,11 @@ const MODES: [RgbMode; 9] = [
 ];
 
 /// `ColorCycle`, `MeteorShower`, `Runway` and `TailChasing` are repurposed
-/// here exactly like in `rgb_editor` — wireless only, wired devices are
-/// skipped for all four (see `apply_global_effect`), since a wired device
-/// with genuine native support would otherwise get its real,
-/// differently-behaving mode under these misleading labels.
-/// `Meteor`/`MeteorShower` render a physically-accurate band crossing each
-/// fan of a multi-fan hub (`meteor_band_frames`) — or, for non-fan devices
-/// like a Strimer cable, merge every physical strip into one continuous
-/// meteor (`meteor_frames`), same as before. `Runway` keeps that older
-/// every-strip-in-sync rendering (`meteor_frames`) always, even on a fan
-/// hub, for whoever preferred that look over the newer band-crossing
-/// default. `TailChasing` promotes the band-crossing idea to whole
-/// *devices*, in the device order set below (`meteor_relay_across_devices`)
-/// — this one only exists here, since a single-device page has no other
-/// devices to relay across.
+/// modes — wireless only, wired devices skipped (see `apply_global_effect`).
+/// `Meteor`/`MeteorShower` band-cross each fan of a hub (`meteor_band_frames`)
+/// or merge cable strips into one meteor (`meteor_frames`). `Runway` keeps
+/// the older every-strip-in-sync look always. `TailChasing` relays the
+/// band-crossing idea across whole *devices* (`meteor_relay_across_devices`).
 fn mode_label(mode: RgbMode) -> &'static str {
     if mode == RgbMode::ColorCycle {
         "Gradient Wave"
@@ -65,13 +56,10 @@ fn mode_label(mode: RgbMode) -> &'static str {
     }
 }
 
-/// Modes where every device otherwise just loops its own independent copy
-/// at once — "Sincronizar Efeito" chains them instead, one device's full
-/// turn at a time, same idea as `TailChasing`/"Meteor (Relay)" but as an
-/// opt-in flag for any of these rather than its own dedicated mode. Static
-/// has nothing to chain (an instant color, not an animation); Rainbow
-/// already has its own always-on cross-device wave; `TailChasing` already
-/// *is* this, so the flag would be redundant there.
+/// Modes where "Sincronizar Efeito" can chain devices one turn at a time
+/// instead of each looping independently. Static has nothing to chain;
+/// Rainbow already has its own cross-device wave; `TailChasing` already
+/// is this by default.
 fn supports_sync(mode: RgbMode) -> bool {
     matches!(
         mode,
@@ -1092,5 +1080,47 @@ async fn apply_global_effect(
             ctx.t("ge.devices_suffix"),
             ctx.t("ge.failed_suffix")
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mode_label_repurposed_modes_use_wireless_names() {
+        assert_eq!(mode_label(RgbMode::ColorCycle), "Gradient Wave");
+        assert_eq!(mode_label(RgbMode::MeteorShower), "Meteor (Rainbow)");
+        assert_eq!(mode_label(RgbMode::Runway), "Meteor (Synced)");
+        assert_eq!(mode_label(RgbMode::TailChasing), "Meteor (Relay)");
+    }
+
+    #[test]
+    fn mode_label_other_modes_fall_back_to_display_name() {
+        assert_eq!(mode_label(RgbMode::Static), RgbMode::Static.display_name());
+        assert_eq!(mode_label(RgbMode::Rainbow), RgbMode::Rainbow.display_name());
+    }
+
+    #[test]
+    fn supports_sync_matches_documented_modes() {
+        for &mode in MODES.iter() {
+            let expected = matches!(
+                mode,
+                RgbMode::RainbowMorph
+                    | RgbMode::Breathing
+                    | RgbMode::ColorCycle
+                    | RgbMode::Meteor
+                    | RgbMode::MeteorShower
+                    | RgbMode::Runway
+            );
+            assert_eq!(supports_sync(mode), expected, "mismatch for {mode:?}");
+        }
+    }
+
+    #[test]
+    fn supports_sync_excludes_static_rainbow_and_tail_chasing() {
+        assert!(!supports_sync(RgbMode::Static));
+        assert!(!supports_sync(RgbMode::Rainbow));
+        assert!(!supports_sync(RgbMode::TailChasing));
     }
 }

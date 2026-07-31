@@ -111,3 +111,63 @@ pub async fn clear_stale_wireless_animations(ctx: &Rc<Ctx>) {
         let _ = ctx.client.call_unit(IpcRequest::SetConfig { config }).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn effect(mode: RgbMode) -> RgbEffect {
+        RgbEffect { mode, ..Default::default() }
+    }
+
+    #[test]
+    fn upsert_zones_creates_rgb_section_and_device_when_missing() {
+        let mut config = AppConfig::default();
+        assert!(config.rgb.is_none());
+
+        upsert_zones(&mut config, "wireless:AA", vec![(0, effect(RgbMode::Static))]);
+
+        let rgb = config.rgb.as_ref().unwrap();
+        assert_eq!(rgb.devices.len(), 1);
+        assert_eq!(rgb.devices[0].device_id, "wireless:AA");
+        assert_eq!(rgb.devices[0].zones.len(), 1);
+        assert_eq!(rgb.devices[0].zones[0].zone_index, 0);
+        assert_eq!(rgb.devices[0].zones[0].effect.mode, RgbMode::Static);
+    }
+
+    #[test]
+    fn upsert_zones_updates_existing_zone_in_place() {
+        let mut config = AppConfig::default();
+        upsert_zones(&mut config, "wireless:AA", vec![(0, effect(RgbMode::Static))]);
+        upsert_zones(&mut config, "wireless:AA", vec![(0, effect(RgbMode::Rainbow))]);
+
+        let rgb = config.rgb.as_ref().unwrap();
+        assert_eq!(rgb.devices.len(), 1, "must not duplicate the device entry");
+        assert_eq!(rgb.devices[0].zones.len(), 1, "must not duplicate the zone entry");
+        assert_eq!(rgb.devices[0].zones[0].effect.mode, RgbMode::Rainbow);
+    }
+
+    #[test]
+    fn upsert_zones_adds_new_zone_without_touching_others() {
+        let mut config = AppConfig::default();
+        upsert_zones(&mut config, "wireless:AA", vec![(0, effect(RgbMode::Static))]);
+        upsert_zones(&mut config, "wireless:AA", vec![(1, effect(RgbMode::Breathing))]);
+
+        let zones = &config.rgb.as_ref().unwrap().devices[0].zones;
+        assert_eq!(zones.len(), 2);
+        assert_eq!(zones[0].effect.mode, RgbMode::Static);
+        assert_eq!(zones[1].effect.mode, RgbMode::Breathing);
+    }
+
+    #[test]
+    fn upsert_zones_keeps_devices_independent() {
+        let mut config = AppConfig::default();
+        upsert_zones(&mut config, "wireless:AA", vec![(0, effect(RgbMode::Static))]);
+        upsert_zones(&mut config, "wireless:BB", vec![(0, effect(RgbMode::Rainbow))]);
+
+        let rgb = config.rgb.as_ref().unwrap();
+        assert_eq!(rgb.devices.len(), 2);
+        assert_eq!(rgb.devices[0].zones[0].effect.mode, RgbMode::Static);
+        assert_eq!(rgb.devices[1].zones[0].effect.mode, RgbMode::Rainbow);
+    }
+}
