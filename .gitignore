@@ -2,6 +2,7 @@
 
 # Claude Code — none of it belongs in the repo, not even shared settings.
 .claude/
+docs/
 
 # Editor/IDE cruft
 .vscode/

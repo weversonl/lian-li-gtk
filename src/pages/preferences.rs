@@ -36,6 +36,50 @@ fn general_page(ctx: &Rc<Ctx>) -> adw::PreferencesPage {
 
     let port_row = adw::ActionRow::builder().title(ctx.t("prefs.openrgb_port")).build();
     daemon_group.add(&port_row);
+
+    let restart_row = adw::ActionRow::builder()
+        .title(ctx.t("prefs.restart_daemon"))
+        .subtitle(ctx.t("prefs.restart_daemon_tooltip"))
+        .build();
+    let restart_button = gtk::Button::builder()
+        .icon_name("view-refresh-symbolic")
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .tooltip_text(ctx.t("prefs.restart_daemon"))
+        .build();
+    {
+        let ctx = ctx.clone();
+        let status_row = status_row.clone();
+        restart_button.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "restart", "lianli-daemon"])
+                .spawn();
+            ctx.toast(ctx.t("prefs.restarting_daemon"));
+
+            let ctx = ctx.clone();
+            let status_row = status_row.clone();
+            let button = button.clone();
+            glib::spawn_future_local(async move {
+                glib::timeout_future(std::time::Duration::from_secs(2)).await;
+                match ctx.client.call::<serde_json::Value>(IpcRequest::Ping).await {
+                    Ok(_) => status_row
+                        .set_subtitle(&format!("<span foreground=\"#33d17a\">{}</span>", ctx.t("prefs.running"))),
+                    Err(_) => {
+                        status_row.set_subtitle(&format!(
+                            "<span foreground=\"#e01b24\">{}</span>",
+                            ctx.t("prefs.unreachable")
+                        ));
+                        ctx.toast(ctx.t("prefs.restart_daemon_failed"));
+                    }
+                }
+                button.set_sensitive(true);
+            });
+        });
+    }
+    restart_row.add_suffix(&restart_button);
+    restart_row.set_activatable_widget(Some(&restart_button));
+    daemon_group.add(&restart_row);
     page.add(&daemon_group);
 
     let lang_group = adw::PreferencesGroup::new();
