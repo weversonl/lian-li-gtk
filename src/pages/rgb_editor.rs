@@ -1879,6 +1879,7 @@ mod tests {
             }).collect(),
             supports_direct: false,
             supports_mb_rgb_sync: false,
+            supports_merge_lighting: false,
             total_led_count: zone_leds.iter().sum(),
             supported_scopes: Vec::new(),
             supports_direction: false,

@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Bumps lian-li-gtk's pinned lianli-shared rev to match whatever commit the
+# currently installed lianli-linux-git daemon was built from, then rebuilds
+# and reinstalls the app. Safe to run repeatedly — no-ops if already in sync.
+#
+# Called by:
+#   - update-lian-li-stack (manual, after `yay -S lianli-linux-git --rebuild`)
+#   - the lianli-app-sync pacman hook (automatic, after any package update)
+
+set -uo pipefail
+
+APP_DIR="$HOME/Documentos/projetos/lian-li-gtk"
+DAEMON_SRC="$HOME/.cache/yay/lianli-linux-git/src/lian-li-linux"
+LOG_FILE="$HOME/.local/share/lian-li-app-sync.log"
+
+log() {
+    echo "[$(date -Iseconds)] $*" | tee -a "$LOG_FILE"
+}
+
+if [ ! -d "$DAEMON_SRC/.git" ]; then
+    log "daemon source cache not found at $DAEMON_SRC, skipping (run 'yay -S lianli-linux-git --rebuild' first)"
+    exit 0
+fi
+
+new_rev=$(git -C "$DAEMON_SRC" rev-parse HEAD)
+current_rev=$(grep -oP 'lian-li-linux", rev = "\K[a-f0-9]+' "$APP_DIR/Cargo.toml")
+
+if [ -z "$current_rev" ]; then
+    log "could not find current pinned rev in $APP_DIR/Cargo.toml, aborting"
+    exit 1
+fi
+
+if [ "$new_rev" = "$current_rev" ]; then
+    log "app already pinned to $new_rev, nothing to do"
+    exit 0
+fi
+
+log "bumping lianli-shared pin: $current_rev -> $new_rev"
+sed -i "s/rev = \"$current_rev\"/rev = \"$new_rev\"/" "$APP_DIR/Cargo.toml"
+
+cd "$APP_DIR" || exit 1
+
+if ! cargo update -p lianli-shared >>"$LOG_FILE" 2>&1; then
+    log "cargo update failed, leaving Cargo.toml modified for manual inspection"
+    exit 1
+fi
+
+if ! cargo build --release >>"$LOG_FILE" 2>&1; then
+    log "cargo build failed against rev $new_rev, leaving working tree dirty for manual inspection (previous binary is untouched)"
+    exit 1
+fi
+
+if ! cargo test >>"$LOG_FILE" 2>&1; then
+    log "cargo test failed against rev $new_rev, leaving working tree dirty for manual inspection (previous binary is untouched)"
+    exit 1
+fi
+
+git add Cargo.toml Cargo.lock
+git commit -q -m "chore: bump lianli-shared pin to ${new_rev}
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>" >>"$LOG_FILE" 2>&1
+
+./install.sh >>"$LOG_FILE" 2>&1
+
+pkill -f "$HOME/.local/bin/lian-li-gtk" 2>/dev/null
+sleep 1
+setsid nohup "$HOME/.local/bin/lian-li-gtk" >/tmp/lian-li-gtk.log 2>&1 </dev/null &
+disown
+
+systemctl --user restart lianli-daemon
+
+log "sync complete, app rebuilt and restarted against rev $new_rev"

@@ -8,10 +8,13 @@
 #   ./install.sh              build + install
 #   ./install.sh --uninstall  remove everything this script installed
 #
-# This only ever touches paths under $HOME — no sudo, no system-wide
-# files. It does not install GTK4/libadwaita themselves; if the build
-# fails, install this distro's GTK4 + libadwaita development packages
-# first (see the README's Requirements section).
+# Everything here lives under $HOME — no sudo, no system-wide files —
+# except one optional pacman hook (/etc/pacman.d/hooks) that keeps this
+# app's lianli-shared pin synced whenever the lianli daemon package
+# updates; that step is skipped without a terminal to prompt sudo on.
+# This does not install GTK4/libadwaita themselves; if the build fails,
+# install this distro's GTK4 + libadwaita development packages first
+# (see the README's Requirements section).
 
 set -euo pipefail
 
@@ -29,9 +32,14 @@ DESKTOP_DEST="$DESKTOP_DIR/$APP_ID.desktop"
 uninstall() {
     echo "Removing lian-li-gtk..."
     rm -f "$BIN_DEST" "$ICON_DEST" "$DESKTOP_DEST"
+    rm -f "$BIN_DIR/lian-li-app-sync" "$BIN_DIR/update-lian-li-stack"
     # Autostart entry, if the user ever enabled "start with system" from
     # Preferences — same file this app itself writes (see src/autostart.rs).
     rm -f "$HOME/.config/autostart/$APP_ID.desktop"
+    if [ -f /etc/pacman.d/hooks/lianli-app-sync.hook ]; then
+        echo "Note: the pacman hook is still installed. Remove it with:"
+        echo "  sudo rm /etc/pacman.d/hooks/lianli-app-sync.hook"
+    fi
     hash -r
     command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$DESKTOP_DIR" || true
     command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
@@ -74,6 +82,26 @@ chmod 644 "$DESKTOP_DEST"
 
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$DESKTOP_DIR" || true
 command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+
+echo "Installing daemon-sync helper scripts to $BIN_DIR"
+install -Dm755 "$REPO_DIR/packaging/lian-li-app-sync" "$BIN_DIR/lian-li-app-sync"
+install -Dm755 "$REPO_DIR/packaging/update-lian-li-stack" "$BIN_DIR/update-lian-li-stack"
+
+# Keeps the app's lianli-shared pin from silently drifting out of sync with
+# the installed daemon (see packaging/lian-li-app-sync). Needs sudo, so it
+# only runs when there's a terminal to prompt on — lian-li-app-sync itself
+# calls this script unattended in the background, and must not hang on it.
+HOOK_SRC="$REPO_DIR/packaging/lianli-app-sync.hook"
+HOOK_DEST="/etc/pacman.d/hooks/lianli-app-sync.hook"
+if command -v pacman >/dev/null 2>&1 && ! cmp -s "$HOOK_SRC" "$HOOK_DEST" 2>/dev/null; then
+    if [ -t 0 ]; then
+        echo "Installing pacman hook to auto-sync the app when the daemon updates (needs sudo)..."
+        sudo install -Dm644 "$HOOK_SRC" "$HOOK_DEST" || echo "warning: could not install pacman hook, run manually: sudo install -Dm644 $HOOK_SRC $HOOK_DEST"
+    else
+        echo "Note: pacman hook not installed/updated (no terminal for sudo). Run manually:"
+        echo "  sudo install -Dm644 $HOOK_SRC $HOOK_DEST"
+    fi
+fi
 
 echo
 echo "Installed. Launch from your app launcher (\"LianLiGTK\") or run:"

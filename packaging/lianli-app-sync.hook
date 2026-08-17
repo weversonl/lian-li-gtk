@@ -1,0 +1,10 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = lianli-linux-git
+
+[Action]
+Description = Syncing lian-li-gtk app pin to match updated lianli daemon...
+When = PostTransaction
+Exec = /usr/bin/bash -c "su - verso -c 'setsid nohup /home/verso/.local/bin/lian-li-app-sync >> /home/verso/.local/share/lian-li-app-sync.log 2>&1 < /dev/null &'"

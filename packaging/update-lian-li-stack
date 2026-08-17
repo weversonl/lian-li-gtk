@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Manual entry point (Option A): rebuild the daemon package against current
+# system libs, then sync the app's lianli-shared pin to match and rebuild it.
+set -e
+
+yay -S lianli-linux-git --rebuild
+
+exec "$HOME/.local/bin/lian-li-app-sync"
