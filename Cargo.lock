@@ -1032,8 +1032,8 @@ dependencies = [
 
 [[package]]
 name = "lianli-shared"
-version = "0.6.1"
-source = "git+https://github.com/sgtaziz/lian-li-linux?rev=d262007c9bfbe87ae7c9d390d68ec74e5deb4d0a#d262007c9bfbe87ae7c9d390d68ec74e5deb4d0a"
+version = "0.8.6"
+source = "git+https://github.com/sgtaziz/lian-li-linux?rev=cdb050088d8882b0da159035f14e13898b48cf22#cdb050088d8882b0da159035f14e13898b48cf22"
 dependencies = [
  "anyhow",
  "hex",
@@ -1041,6 +1041,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "thiserror",
  "tracing",
 ]
 
