@@ -159,6 +159,27 @@ After that, "LianLiGTK" shows up in your app launcher with its own icon (window,
 ./install.sh --uninstall
 ```
 
+## Troubleshooting
+
+**Wireless devices (fans, AIOs, LCDs) don't show up on Linux, but work fine on Windows/L-Connect, and `lianli-daemon`'s logs show `TX device not found` / `no TX/RX devices found` even though `lsusb` shows the dongles present.**
+
+This is a packaging bug in the `lianli-linux-git` AUR package, not this app: its udev rules (`60-lianli.rules`) grant device access via a `lianli` system group that the package's install script never actually creates. When that group doesn't exist, udev silently fails to apply the whole permission rule (not just the group — mode and the `uaccess` ACL tag go with it), so the daemon can't open the dongles for read/write even though they're physically detected.
+
+Check for it directly:
+
+```sh
+getent group lianli   # empty output means this is your problem
+```
+
+Fix:
+
+```sh
+sudo groupadd -f lianli
+sudo udevadm control --reload-rules
+```
+
+Then **reboot** — a synthetic `udevadm trigger`, even targeted at the exact device, did not reliably reapply the corrected permissions to already-enumerated devices; only a real cold boot did in testing.
+
 ## Credits
 
 - [sgtaziz/lian-li-linux](https://github.com/sgtaziz/lian-li-linux) — the daemon, the protocol reverse-engineering, and the shared types this client depends on entirely. This project would not exist without that work.

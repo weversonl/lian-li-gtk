@@ -742,11 +742,18 @@ async fn apply_global_effect(
         if matches!(mode, RgbMode::ColorCycle | RgbMode::MeteorShower | RgbMode::Runway | RgbMode::TailChasing) {
             continue;
         }
-        let zone_count = caps
-            .iter()
-            .find(|c| c.device_id == device.device_id)
-            .map(|c| c.zones.len().max(1))
-            .unwrap_or(1);
+        // The daemon names ENE6K77 wired ports differently across endpoints
+        // (`hid:<serial>:portN` from ListDevices, `hid:<serial>:groupN` from
+        // GetRgbCapabilities) — see `rgb_caps_id_matches` in rgb_editor.rs.
+        // `SetRgbEffect` needs the capabilities one, not `device.device_id`.
+        let Some(dev_caps) =
+            caps.iter().find(|c| crate::pages::rgb_editor::rgb_caps_id_matches(&c.device_id, &device.device_id))
+        else {
+            failed += 1;
+            continue;
+        };
+        let rgb_device_id = dev_caps.device_id.clone();
+        let zone_count = dev_caps.zones.len().max(1);
         let effect = RgbEffect {
             mode,
             colors: vec![color],
@@ -759,7 +766,7 @@ async fn apply_global_effect(
         let mut device_ok = true;
         for zone in 0..zone_count as u8 {
             let request = IpcRequest::SetRgbEffect {
-                device_id: device.device_id.clone(),
+                device_id: rgb_device_id.clone(),
                 zone,
                 effect: effect.clone(),
             };

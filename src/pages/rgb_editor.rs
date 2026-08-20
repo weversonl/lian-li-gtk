@@ -178,7 +178,7 @@ pub fn page(ctx: &Rc<Ctx>, device_id: &str) -> adw::NavigationPage {
             .await;
 
         let caps = match caps {
-            Ok(all) => all.into_iter().find(|c| c.device_id == device_id),
+            Ok(all) => all.into_iter().find(|c| rgb_caps_id_matches(&c.device_id, &device_id)),
             Err(e) => {
                 ctx.toast(&format!("{}: {e}", ctx.t("rgb_editor.failed_load_caps")));
                 None
@@ -214,6 +214,9 @@ fn build_editor(
     // Owned so it can be captured by 'static signal-handler closures below.
     let device_id = device_id.to_string();
     let is_wireless = device_id.starts_with("wireless:");
+    // `caps.device_id` is what the daemon actually expects on outbound RGB
+    // calls — see `rgb_caps_id_matches` for why it can differ from `device_id`.
+    let rgb_device_id = caps.device_id.clone();
 
     // A slider with marks (like FPS) or next to a shorter one-line title
     // can still end up allocated more or less than the others, since the
@@ -1147,6 +1150,7 @@ fn build_editor(
     let do_apply = {
         let ctx = ctx.clone();
         let device_id = device_id.clone();
+        let rgb_device_id = rgb_device_id.clone();
         let state = state.clone();
         move |apply_to_all: bool| {
             let s = state.borrow();
@@ -1215,14 +1219,14 @@ fn build_editor(
             let zones: Vec<u8> =
                 if apply_to_all { (0..zone_count as u8).collect() } else { vec![zone] };
 
-            // Each target zone gets its own task — a Segments Effect zone
-            // loops forever (see `apply_segments`), so awaiting them in
-            // sequence would starve every zone after the first.
-            for target_zone in zones {
-                let ctx = ctx.clone();
-                let device_id = device_id.clone();
-                glib::spawn_future_local(async move {
-                    if segments_enabled {
+            if segments_enabled {
+                // A Segments effect zone loops forever (see `apply_segments`),
+                // so each one needs its own independent task — awaiting them
+                // in sequence would starve every zone after the first.
+                for target_zone in zones {
+                    let ctx = ctx.clone();
+                    let device_id = device_id.clone();
+                    glib::spawn_future_local(async move {
                         apply_segments(
                             &ctx,
                             &device_id,
@@ -1251,9 +1255,22 @@ fn build_editor(
                             strip_count,
                         )
                         .await;
-                        return;
-                    }
+                    });
+                }
+                return;
+            }
 
+            // Unlike Segments, a plain effect apply completes and returns, so
+            // all target zones share one task and are sent one at a time —
+            // concurrent SetRgbEffect calls to different zones of the same
+            // physical wired hub race on its HID buffer and clobber each
+            // other (this is exactly what motivated serializing the
+            // reconnect heartbeat in identify.rs — see its doc comment).
+            let ctx = ctx.clone();
+            let device_id = device_id.clone();
+            let rgb_device_id = rgb_device_id.clone();
+            glib::spawn_future_local(async move {
+                for target_zone in zones {
                     if is_wireless && WIRELESS_ANIMATED_MODES.contains(&mode) {
                         apply_wireless_animation(
                             &ctx,
@@ -1270,13 +1287,22 @@ fn build_editor(
                             strip_count,
                         )
                         .await;
-                        return;
+                        continue;
                     }
 
                     // Wireless ignores `RgbEffect.brightness`, so bake it into the color.
                     let effect_colors: Vec<[u8; 3]> = if is_wireless {
                         let factor = brightness_percent / 100.0;
                         colors.iter().map(|c| scale_color(*c, factor)).collect()
+                    } else if matches!(mode, RgbMode::Static | RgbMode::Breathing) {
+                        // Static/Breathing are single-color everywhere — sending the
+                        // full 8-slot gradient array (leftover from switching from a
+                        // gradient mode) makes the ENE6K77 driver treat it as its
+                        // "colorful corners" palette on dual-ring fans instead of a
+                        // solid fill, so only the fan's inner ring ends up the color
+                        // the user picked while the outer ring shows old gradient
+                        // colors (or is skipped for modes without an outer variant).
+                        vec![colors[0]]
                     } else {
                         colors.to_vec()
                     };
@@ -1291,7 +1317,7 @@ fn build_editor(
                     };
                     ctx.bump_segment_anim(&format!("{device_id}:{target_zone}"));
                     let request = IpcRequest::SetRgbEffect {
-                        device_id: device_id.clone(),
+                        device_id: rgb_device_id.clone(),
                         zone: target_zone,
                         effect: effect.clone(),
                     };
@@ -1306,8 +1332,8 @@ fn build_editor(
                         }
                         Err(e) => ctx.toast(&format!("{}: {e}", ctx.t("rgb_editor.failed_apply"))),
                     }
-                });
-            }
+                }
+            });
         }
     };
 
@@ -1348,12 +1374,31 @@ fn has_fan(ctx: &Rc<Ctx>, device_id: &str) -> bool {
     ctx.state.borrow().devices.iter().any(|d| d.device_id == device_id && d.has_fan)
 }
 
+/// Matches a `RgbDeviceCapabilities.device_id` against a `ListDevices`
+/// device_id. The daemon names ENE6K77 Infinity fan controllers
+/// `hid:<serial>:portN` in `ListDevices`/`SetRgbEffect` but
+/// `hid:<serial>:groupN` in `GetRgbCapabilities` for the same physical
+/// port — an upstream naming inconsistency between the two endpoints, not
+/// a real device mismatch — so fall back to comparing the numeric suffix
+/// when the prefixes match but the "port"/"group" word doesn't.
+pub(crate) fn rgb_caps_id_matches(caps_id: &str, device_id: &str) -> bool {
+    if caps_id == device_id {
+        return true;
+    }
+    fn split(id: &str) -> Option<(&str, &str)> {
+        let (prefix, suffix) = id.rsplit_once(':')?;
+        let index = suffix.strip_prefix("port").or_else(|| suffix.strip_prefix("group"))?;
+        Some((prefix, index))
+    }
+    matches!((split(caps_id), split(device_id)), (Some(a), Some(b)) if a == b)
+}
+
 /// Real per-fan zone sizes for `device_id`, truncated to `strip_count` — see
 /// `effects::meteor_band_frames`'s doc comment on why a hub's own
 /// `caps.zones` can include unpopulated ports that must be excluded.
 fn fan_zone_led_counts(device_id: &str, caps: &[RgbDeviceCapabilities], strip_count: usize) -> Vec<usize> {
     caps.iter()
-        .find(|c| c.device_id == device_id)
+        .find(|c| rgb_caps_id_matches(&c.device_id, device_id))
         .map(|c| c.zones.iter().take(strip_count).map(|z| z.led_count as usize).collect())
         .unwrap_or_default()
 }
@@ -1383,7 +1428,7 @@ async fn apply_wireless_animation(
             return;
         }
     };
-    let Some(dev_caps) = caps.iter().find(|c| c.device_id == device_id) else {
+    let Some(dev_caps) = caps.iter().find(|c| rgb_caps_id_matches(&c.device_id, device_id)) else {
         ctx.toast(ctx.t("rgb_editor.caps_not_found"));
         return;
     };
@@ -1542,7 +1587,7 @@ pub(crate) async fn apply_segments_from_snapshot(
         match ctx.client.call::<Vec<RgbDeviceCapabilities>>(IpcRequest::GetRgbCapabilities).await {
             Ok(caps) => caps
                 .iter()
-                .find(|c| c.device_id == device_id)
+                .find(|c| rgb_caps_id_matches(&c.device_id, device_id))
                 .map(|c| (0..c.zones.len() as u8).collect())
                 .unwrap_or_else(|| vec![snapshot.zone]),
             Err(_) => vec![snapshot.zone],
@@ -1667,7 +1712,7 @@ pub(crate) async fn apply_segments(
             return;
         }
     };
-    let Some(dev_caps) = caps.iter().find(|c| c.device_id == device_id) else {
+    let Some(dev_caps) = caps.iter().find(|c| rgb_caps_id_matches(&c.device_id, device_id)) else {
         ctx.toast(ctx.t("rgb_editor.caps_not_found"));
         return;
     };
@@ -1790,7 +1835,7 @@ pub(crate) async fn apply_segments(
                 .next()
                 .unwrap_or_default();
 
-            let request = IpcRequest::SetRgbDirect { device_id: device_id.to_string(), zone, colors };
+            let request = IpcRequest::SetRgbDirect { device_id: dev_caps.device_id.clone(), zone, colors };
             match ctx.client.call_unit(request).await {
                 Ok(()) => {
                     // Only claim the toast/gen if nothing newer pre-empted us meanwhile.
@@ -1851,7 +1896,7 @@ pub(crate) async fn apply_segments(
                 return;
             }
             let request = IpcRequest::SetRgbDirect {
-                device_id: device_id.to_string(),
+                device_id: dev_caps.device_id.clone(),
                 zone,
                 colors: frames[i % frames.len()].clone(),
             };
