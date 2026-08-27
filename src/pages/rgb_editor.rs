@@ -1323,9 +1323,7 @@ fn build_editor(
                     };
                     match ctx.client.call_unit(request).await {
                         Ok(()) => {
-                            if is_wireless {
-                                ctx.record_static_effect(&device_id, vec![(target_zone, effect.clone())]);
-                            }
+                            ctx.record_static_effect(&device_id, vec![(target_zone, effect.clone())]);
                             crate::rgb_persist::persist_rgb_effect(&ctx, &device_id, vec![(target_zone, effect)])
                                 .await;
                             ctx.toast(ctx.t("rgb_editor.effect_applied"));

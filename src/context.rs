@@ -369,10 +369,29 @@ impl Ctx {
         crate::last_effect::save(&map);
     }
 
-    /// Replaces (not merges) the recorded static effect for a device.
+    /// Merges into the recorded static effect for a device, keyed by
+    /// `(zone, scope)` — a dual-ring fan (e.g. SL Infinity) applies Inner
+    /// and Outer as two separate calls to this fn for the *same* zone, and
+    /// each needs its own entry so `identify::reapply_last_effect` resends
+    /// both instead of the later call clobbering the earlier one. A new
+    /// `RgbScope::All` entry for a zone supersedes (and clears) any
+    /// Inner/Outer entries for that zone, and vice versa, since `All`
+    /// overwrites the whole zone on the device.
     pub fn record_static_effect(&self, device_id: &str, zone_effects: Vec<(u8, RgbEffect)>) {
         let mut map = self.last_effect.borrow_mut();
-        map.insert(device_id.to_string(), LastEffect::Static(zone_effects));
+        let mut merged: Vec<(u8, RgbEffect)> = match map.get(device_id) {
+            Some(LastEffect::Static(existing)) => existing.clone(),
+            _ => Vec::new(),
+        };
+        for (zone, effect) in zone_effects {
+            if effect.scope == RgbScope::All {
+                merged.retain(|(z, _)| *z != zone);
+            } else {
+                merged.retain(|(z, e)| !(*z == zone && (e.scope == effect.scope || e.scope == RgbScope::All)));
+            }
+            merged.push((zone, effect));
+        }
+        map.insert(device_id.to_string(), LastEffect::Static(merged));
         crate::last_effect::save(&map);
     }
 

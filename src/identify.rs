@@ -71,12 +71,29 @@ async fn reapply_last_effect_inner(ctx: &Rc<Ctx>, device_id: &str, notify_on_fai
             ok
         }
         Some(LastEffect::Static(zone_effects)) => {
+            // The daemon names ENE6K77 wired ports differently across
+            // endpoints (`hid:<serial>:portN` from ListDevices, which is
+            // what `device_id` is here, vs `hid:<serial>:groupN` from
+            // GetRgbCapabilities) — see `rgb_caps_id_matches` in
+            // rgb_editor.rs. `SetRgbEffect` needs the capabilities one.
+            let outbound_device_id = if device_id.starts_with("wireless:") {
+                device_id.to_string()
+            } else {
+                match ctx.client.call::<Vec<RgbDeviceCapabilities>>(IpcRequest::GetRgbCapabilities).await {
+                    Ok(caps) => caps
+                        .into_iter()
+                        .find(|c| crate::pages::rgb_editor::rgb_caps_id_matches(&c.device_id, device_id))
+                        .map(|c| c.device_id)
+                        .unwrap_or_else(|| device_id.to_string()),
+                    Err(_) => device_id.to_string(),
+                }
+            };
             let mut all_ok = true;
             for (zone, effect) in zone_effects {
                 let mut zone_ok = false;
                 for attempt in 0..MAX_ATTEMPTS {
                     let request = IpcRequest::SetRgbEffect {
-                        device_id: device_id.to_string(),
+                        device_id: outbound_device_id.clone(),
                         zone,
                         effect: effect.clone(),
                     };
