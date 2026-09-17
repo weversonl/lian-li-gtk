@@ -704,7 +704,7 @@ fn build_editor(
                     ui.refresh_curve_list();
                     ui.ctx.toast(ui.ctx.t("fc.names_deduped"));
                 }
-                match ui.ctx.client.call_unit(IpcRequest::SetConfig { config }).await {
+                match ui.ctx.client.call_unit(IpcRequest::SetConfig { config: Box::new(config) }).await {
                     Ok(()) => ui.ctx.toast(ui.ctx.t("fc.curves_saved")),
                     Err(e) => ui.ctx.toast(&format!("{}: {e}", ui.ctx.t("fc.failed_save"))),
                 }

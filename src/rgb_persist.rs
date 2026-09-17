@@ -25,6 +25,8 @@ fn upsert_zones(config: &mut AppConfig, device_id: &str, zone_effects: Vec<(u8, 
                 mb_rgb_sync: false,
                 active_preset: None,
                 zones: Vec::new(),
+                regions: None,
+                effect_memory: Vec::new(),
             });
             rgb.devices.len() - 1
         }
@@ -57,7 +59,7 @@ pub async fn persist_rgb_effects(ctx: &Rc<Ctx>, entries: Vec<(String, Vec<(u8, R
     for (device_id, zone_effects) in entries {
         upsert_zones(&mut config, &device_id, zone_effects);
     }
-    let _ = ctx.client.call_unit(IpcRequest::SetConfig { config }).await;
+    let _ = ctx.client.call_unit(IpcRequest::SetConfig { config: Box::new(config) }).await;
 }
 
 /// Wipes persisted `AppConfig.rgb` zone effects for the given wireless
@@ -80,7 +82,7 @@ pub async fn clear_wireless_rgb_configs(ctx: &Rc<Ctx>, device_ids: &[String]) {
         }
     }
     if changed {
-        let _ = ctx.client.call_unit(IpcRequest::SetConfig { config }).await;
+        let _ = ctx.client.call_unit(IpcRequest::SetConfig { config: Box::new(config) }).await;
     }
 }
 
@@ -108,7 +110,7 @@ pub async fn clear_stale_wireless_animations(ctx: &Rc<Ctx>) {
     }
 
     if changed {
-        let _ = ctx.client.call_unit(IpcRequest::SetConfig { config }).await;
+        let _ = ctx.client.call_unit(IpcRequest::SetConfig { config: Box::new(config) }).await;
     }
 }
 

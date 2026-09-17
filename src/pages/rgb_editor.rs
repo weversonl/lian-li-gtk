@@ -89,6 +89,17 @@ fn scope_label(s: RgbScope, ctx: &Ctx) -> &'static str {
         RgbScope::Bottom => ctx.t("rgb_editor.scope_bottom"),
         RgbScope::Inner => ctx.t("rgb_editor.scope_inner"),
         RgbScope::Outer => ctx.t("rgb_editor.scope_outer"),
+        RgbScope::Fan => ctx.t("rgb_editor.scope_fan"),
+        RgbScope::Center => ctx.t("rgb_editor.scope_center"),
+        RgbScope::Pump => ctx.t("rgb_editor.scope_pump"),
+        RgbScope::Front => ctx.t("rgb_editor.scope_front"),
+        RgbScope::Rear => ctx.t("rgb_editor.scope_rear"),
+        RgbScope::Segment1 => ctx.t("rgb_editor.scope_segment1"),
+        RgbScope::Segment2 => ctx.t("rgb_editor.scope_segment2"),
+        RgbScope::Segment3 => ctx.t("rgb_editor.scope_segment3"),
+        RgbScope::Segment4 => ctx.t("rgb_editor.scope_segment4"),
+        RgbScope::Segment5 => ctx.t("rgb_editor.scope_segment5"),
+        RgbScope::Segment6 => ctx.t("rgb_editor.scope_segment6"),
     }
 }
 
@@ -1913,9 +1924,18 @@ mod tests {
 
     fn caps(device_id: &str, zone_leds: &[u16]) -> RgbDeviceCapabilities {
         RgbDeviceCapabilities {
+            group_effect_modes: Vec::new(),
+            zone_effect_modes: Vec::new(),
             device_id: device_id.to_string(),
             device_name: String::new(),
             supported_modes: Vec::new(),
+            software_modes: Vec::new(),
+            sync_led_count: None,
+            sync_effect_parameters: Vec::new(),
+            effect_regions: Vec::new(),
+            effect_parameters: Vec::new(),
+            region_parameters: Vec::new(),
+            render_profile: None,
             zones: zone_leds.iter().map(|&led_count| lianli_shared::rgb::RgbZoneInfo {
                 name: String::new(),
                 led_count,
@@ -1926,6 +1946,7 @@ mod tests {
             total_led_count: zone_leds.iter().sum(),
             supported_scopes: Vec::new(),
             supports_direction: false,
+            rf_owned: false,
         }
     }
 

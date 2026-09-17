@@ -317,7 +317,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1032,15 +1032,17 @@ dependencies = [
 
 [[package]]
 name = "lianli-shared"
-version = "0.8.6"
-source = "git+https://github.com/sgtaziz/lian-li-linux?rev=cdb050088d8882b0da159035f14e13898b48cf22#cdb050088d8882b0da159035f14e13898b48cf22"
+version = "1.0.0"
+source = "git+https://github.com/sgtaziz/lian-li-linux?rev=178a494c6f195d22eefd6dd73455b5fe4a352df7#178a494c6f195d22eefd6dd73455b5fe4a352df7"
 dependencies = [
  "anyhow",
  "hex",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror",
  "tracing",
 ]
@@ -1307,7 +1309,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1430,7 +1432,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1693,7 +1695,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

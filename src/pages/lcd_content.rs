@@ -179,7 +179,7 @@ fn build_editor(
         let device_id = device_id.clone();
         let config = (*lcd_config.borrow()).clone();
         glib::spawn_future_local(async move {
-            let request = IpcRequest::SetLcdMedia { device_id, config };
+            let request = IpcRequest::SetLcdMedia { device_id, config: Box::new(config) };
             match ctx.client.call_unit(request).await {
                 Ok(()) => ctx.toast(ctx.t("lcd.content_applied")),
                 Err(e) => ctx.toast(&format!("{}: {e}", ctx.t("lcd.failed_apply"))),

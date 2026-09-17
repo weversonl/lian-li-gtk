@@ -233,7 +233,7 @@ async fn apply_profile(ctx: &Rc<Ctx>, profile: &Profile) {
     let mut ok = 0usize;
     let mut failed = 0usize;
 
-    if ctx.client.call_unit(IpcRequest::SetConfig { config: profile.app_config.clone() }).await.is_err() {
+    if ctx.client.call_unit(IpcRequest::SetConfig { config: Box::new(profile.app_config.clone()) }).await.is_err() {
         ctx.toast(ctx.t("profiles.failed_capture"));
         return;
     }

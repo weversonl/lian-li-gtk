@@ -10,14 +10,14 @@
 set -uo pipefail
 
 APP_DIR="$HOME/Documentos/projetos/lian-li-gtk"
-DAEMON_SRC="$HOME/.cache/yay/lianli-linux-git/src/lian-li-linux"
+DAEMON_SRC="$HOME/.cache/yay/lianli-linux-git/lian-li-linux"
 LOG_FILE="$HOME/.local/share/lian-li-app-sync.log"
 
 log() {
     echo "[$(date -Iseconds)] $*" | tee -a "$LOG_FILE"
 }
 
-if [ ! -d "$DAEMON_SRC/.git" ]; then
+if [ ! -f "$DAEMON_SRC/HEAD" ]; then
     log "daemon source cache not found at $DAEMON_SRC, skipping (run 'yay -S lianli-linux-git --rebuild' first)"
     exit 0
 fi
@@ -56,9 +56,7 @@ if ! cargo test >>"$LOG_FILE" 2>&1; then
 fi
 
 git add Cargo.toml Cargo.lock
-git commit -q -m "chore: bump lianli-shared pin to ${new_rev}
-
-Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>" >>"$LOG_FILE" 2>&1
+git commit -q -m "chore: bump lianli-shared pin to ${new_rev}" >>"$LOG_FILE" 2>&1
 
 ./install.sh >>"$LOG_FILE" 2>&1
 
