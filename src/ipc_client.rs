@@ -3,11 +3,12 @@
 //! Newline-delimited JSON, one response per request, no request id — so
 //! every call opens a fresh connection, sends one line, reads one line.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use async_io::Timer;
 use async_net::unix::UnixStream;
 use futures_lite::future::or;
 use futures_lite::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use lianli_shared::daemon::DaemonInfo;
 use lianli_shared::ipc::{IpcRequest, IpcResponse};
 use serde::de::DeserializeOwned;
 use std::path::PathBuf;
@@ -47,7 +48,29 @@ impl IpcClient {
     }
 
     async fn call_raw(&self, request: IpcRequest) -> Result<serde_json::Value> {
+        let request = self.guard_if_needed(request).await?;
+        self.send(request).await
+    }
+
+    async fn send(&self, request: IpcRequest) -> Result<serde_json::Value> {
         or(self.call_raw_inner(request), Self::timeout()).await
+    }
+
+    /// The daemon now rejects any mutating request that isn't wrapped in
+    /// `IpcRequest::Guarded` with a fresh `WriteGuard` (see
+    /// `lianli_shared::daemon::DaemonInfo::write_guard`) — a staleness check
+    /// meant to stop a client talking to a daemon instance it hasn't just
+    /// queried. Goes through `send` directly (not `call_raw`) since
+    /// `GetDaemonInfo` is read-only and needs no guard of its own.
+    async fn guard_if_needed(&self, request: IpcRequest) -> Result<IpcRequest> {
+        if request.is_read_only() {
+            return Ok(request);
+        }
+        let value = self.send(IpcRequest::GetDaemonInfo).await?;
+        let info: DaemonInfo =
+            serde_json::from_value(value).context("unexpected response shape from daemon")?;
+        let guard = info.write_guard(&info.version).map_err(|e| anyhow!(e))?;
+        Ok(IpcRequest::Guarded { guard, request: Box::new(request) })
     }
 
     async fn timeout() -> Result<serde_json::Value> {

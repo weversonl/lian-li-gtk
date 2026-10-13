@@ -6,6 +6,13 @@
 //! (`cycle_ms`); smoothness is a literal FPS value, and `frame_count`
 //! follows from `fps * cycle_seconds`.
 
+/// Feature flag for the FPS/smoothness slider in the RGB Editor and Global
+/// Effects UI. The daemon now hard-caps `SetRgbFrames` at 20fps (see
+/// `fps_to_interval_ms`), so the slider's range above that no longer does
+/// anything — hidden for now rather than deleted, in case the cap loosens
+/// again upstream. Flip to `true` to bring the control back.
+pub const SHOW_FPS_CONTROL: bool = false;
+
 /// Percentage (0-100) → `RgbEffect.speed` (0-4), for wired firmware.
 pub fn percent_to_speed4(percent: f64) -> u8 {
     ((percent / 100.0) * 4.0).round().clamp(0.0, 4.0) as u8
@@ -49,9 +56,11 @@ pub fn percent_to_cycle_ms(percent: f64) -> f64 {
     6000.0 - t * 5100.0
 }
 
-/// FPS → per-frame interval in ms, floored at 8ms (125fps).
+/// FPS → per-frame interval in ms, floored at 50ms (20fps) — the daemon
+/// rejects `SetRgbFrames` below that, since its own playback loop is fixed
+/// at 20fps.
 pub fn fps_to_interval_ms(fps: f64) -> u16 {
-    ((1000.0 / fps.max(1.0)).round() as u16).max(8)
+    ((1000.0 / fps.max(1.0)).round() as u16).max(50)
 }
 
 /// Frames needed for `cycle_ms` at `fps`, clamped to bound payload size.
@@ -695,8 +704,8 @@ mod tests {
     }
 
     #[test]
-    fn fps_to_interval_ms_floors_at_8ms() {
-        assert_eq!(fps_to_interval_ms(1000.0), 8);
+    fn fps_to_interval_ms_floors_at_50ms() {
+        assert_eq!(fps_to_interval_ms(1000.0), 50);
         assert_eq!(fps_to_interval_ms(10.0), 100);
     }
 

@@ -283,47 +283,50 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
 
     controls_group.add(&sync_devices_row);
 
-    let fps_row = adw::ActionRow::builder()
-        .title(ctx.t("ge.fps"))
-        .subtitle(ctx.t("ge.fps_subtitle"))
-        .build();
     let fps_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 5.0, 60.0, 1.0);
     fps_scale.set_value(saved_ge.fps);
     fps_scale.set_hexpand(false);
-    fps_scale.add_mark(15.0, gtk::PositionType::Bottom, Some("15"));
-    fps_scale.add_mark(30.0, gtk::PositionType::Bottom, Some("30"));
-    fps_scale.add_mark(60.0, gtk::PositionType::Bottom, Some("60"));
-    fps_row.add_suffix(&slider_wrap(&fps_scale, |v| format!("{v:.0}")));
 
-    let range_row = adw::ActionRow::builder().title(ctx.t("ge.over_60fps")).build();
-    let range_switch = gtk::Switch::builder().valign(gtk::Align::Center).active(false).build();
-    {
-        let fps_scale = fps_scale.clone();
-        range_switch.connect_state_set(move |_, extended| {
-            fps_scale.clear_marks();
-            if extended {
-                fps_scale.set_range(5.0, 120.0);
-                fps_scale.add_mark(15.0, gtk::PositionType::Bottom, Some("15"));
-                fps_scale.add_mark(30.0, gtk::PositionType::Bottom, Some("30"));
-                fps_scale.add_mark(60.0, gtk::PositionType::Bottom, Some("60"));
-                fps_scale.add_mark(120.0, gtk::PositionType::Bottom, Some("120"));
-                fps_scale.add_css_class("fps-warning-zone");
-            } else {
-                if fps_scale.value() > 60.0 {
-                    fps_scale.set_value(60.0);
+    if crate::effects::SHOW_FPS_CONTROL {
+        let fps_row = adw::ActionRow::builder()
+            .title(ctx.t("ge.fps"))
+            .subtitle(ctx.t("ge.fps_subtitle"))
+            .build();
+        fps_scale.add_mark(15.0, gtk::PositionType::Bottom, Some("15"));
+        fps_scale.add_mark(30.0, gtk::PositionType::Bottom, Some("30"));
+        fps_scale.add_mark(60.0, gtk::PositionType::Bottom, Some("60"));
+        fps_row.add_suffix(&slider_wrap(&fps_scale, |v| format!("{v:.0}")));
+        controls_group.add(&fps_row);
+
+        let range_row = adw::ActionRow::builder().title(ctx.t("ge.over_60fps")).build();
+        let range_switch = gtk::Switch::builder().valign(gtk::Align::Center).active(false).build();
+        {
+            let fps_scale = fps_scale.clone();
+            range_switch.connect_state_set(move |_, extended| {
+                fps_scale.clear_marks();
+                if extended {
+                    fps_scale.set_range(5.0, 120.0);
+                    fps_scale.add_mark(15.0, gtk::PositionType::Bottom, Some("15"));
+                    fps_scale.add_mark(30.0, gtk::PositionType::Bottom, Some("30"));
+                    fps_scale.add_mark(60.0, gtk::PositionType::Bottom, Some("60"));
+                    fps_scale.add_mark(120.0, gtk::PositionType::Bottom, Some("120"));
+                    fps_scale.add_css_class("fps-warning-zone");
+                } else {
+                    if fps_scale.value() > 60.0 {
+                        fps_scale.set_value(60.0);
+                    }
+                    fps_scale.set_range(5.0, 60.0);
+                    fps_scale.add_mark(15.0, gtk::PositionType::Bottom, Some("15"));
+                    fps_scale.add_mark(30.0, gtk::PositionType::Bottom, Some("30"));
+                    fps_scale.add_mark(60.0, gtk::PositionType::Bottom, Some("60"));
+                    fps_scale.remove_css_class("fps-warning-zone");
                 }
-                fps_scale.set_range(5.0, 60.0);
-                fps_scale.add_mark(15.0, gtk::PositionType::Bottom, Some("15"));
-                fps_scale.add_mark(30.0, gtk::PositionType::Bottom, Some("30"));
-                fps_scale.add_mark(60.0, gtk::PositionType::Bottom, Some("60"));
-                fps_scale.remove_css_class("fps-warning-zone");
-            }
-            glib::Propagation::Proceed
-        });
+                glib::Propagation::Proceed
+            });
+        }
+        range_row.add_suffix(&range_switch);
+        controls_group.add(&range_row);
     }
-    range_row.add_suffix(&range_switch);
-    controls_group.add(&range_row);
-    controls_group.add(&fps_row);
 
     let brightness_row = adw::ActionRow::builder().title(ctx.t("ge.brightness")).build();
     let brightness_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
@@ -763,8 +766,15 @@ async fn apply_global_effect(
             scope: Default::default(),
             disabled: false,
         };
+        // A device with a render profile (grouped/software-rendered zones,
+        // e.g. SL-INF fan hubs) now rejects any non-Direct `SetRgbEffect`
+        // outside zone 0 — "animation modes apply to the device group, not
+        // individual fans". Only hardware-native multi-zone devices (no
+        // render profile) still need one call per zone.
+        let target_zones: Vec<u8> =
+            if dev_caps.render_profile.is_some() { vec![0] } else { (0..zone_count as u8).collect() };
         let mut device_ok = true;
-        for zone in 0..zone_count as u8 {
+        for &zone in &target_zones {
             let request = IpcRequest::SetRgbEffect {
                 device_id: rgb_device_id.clone(),
                 zone,
@@ -778,8 +788,8 @@ async fn apply_global_effect(
         if device_ok {
             ok += 1;
             let zone_effects: Vec<(u8, RgbEffect)> =
-                (0..zone_count as u8).map(|z| (z, effect.clone())).collect();
-            to_persist.push((device.device_id.clone(), zone_effects));
+                target_zones.iter().map(|&z| (z, effect.clone())).collect();
+            to_persist.push((rgb_device_id.clone(), zone_effects));
         } else {
             failed += 1;
         }
@@ -789,22 +799,29 @@ async fn apply_global_effect(
         RgbMode::Static => {
             let wireless_color = scale_color(color, brightness_percent / 100.0);
             for device in &wireless {
-                let zone_count = caps
-                    .iter()
-                    .find(|c| c.device_id == device.device_id)
-                    .map(|c| c.zones.len().max(1))
-                    .unwrap_or(1);
+                let dev_caps = caps.iter().find(|c| c.device_id == device.device_id);
+                let zone_count = dev_caps.map(|c| c.zones.len().max(1)).unwrap_or(1);
                 let effect = RgbEffect {
                     mode: RgbMode::Static,
-                    colors: vec![wireless_color],
+                    // The daemon's wireless palette only overwrites as many of
+                    // its 4 default rainbow slots as we send — see the
+                    // analogous comment in rgb_editor.rs.
+                    colors: vec![wireless_color; 4],
                     speed: wired_speed,
                     brightness: wired_brightness,
                     direction: resolve_direction(&device.device_id),
                     scope: Default::default(),
                     disabled: false,
                 };
+                // See the analogous comment in the wired loop above — grouped
+                // wireless devices (SL-INF fan hubs) only accept zone 0.
+                let target_zones: Vec<u8> = if dev_caps.is_some_and(|c| c.render_profile.is_some()) {
+                    vec![0]
+                } else {
+                    (0..zone_count as u8).collect()
+                };
                 let mut device_ok = true;
-                for zone in 0..zone_count as u8 {
+                for &zone in &target_zones {
                     let request = IpcRequest::SetRgbEffect {
                         device_id: device.device_id.clone(),
                         zone,
@@ -817,7 +834,7 @@ async fn apply_global_effect(
                 }
                 if device_ok {
                     let zone_effects: Vec<(u8, RgbEffect)> =
-                        (0..zone_count as u8).map(|z| (z, effect.clone())).collect();
+                        target_zones.iter().map(|&z| (z, effect.clone())).collect();
                     ctx.record_static_effect(&device.device_id, zone_effects.clone());
                     to_persist.push((device.device_id.clone(), zone_effects));
                     ok += 1;

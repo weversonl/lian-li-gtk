@@ -6,6 +6,7 @@ use crate::app_state::SharedState;
 use crate::device_rgb_prefs::DeviceRgbPrefs;
 use crate::ipc_client::IpcClient;
 use crate::pages::rgb_editor::MiddleKind;
+use gtk::glib;
 use lianli_shared::ipc::DeviceInfo;
 use lianli_shared::rgb::{RgbDirection, RgbEffect, RgbMode, RgbScope};
 use std::cell::RefCell;
@@ -157,14 +158,33 @@ pub type SharedCtx = Rc<Ctx>;
 
 const TOAST_TIMEOUT_SECS: u32 = 5;
 
+/// Every toast shown to the user also lands here — the app has no other
+/// logging, and a launcher-started process (desktop entry, autostart) has
+/// nowhere else its stdout/stderr would be visible for debugging later.
+fn log_toast(message: &str) {
+    use std::io::Write;
+    let mut dir = glib::user_data_dir();
+    dir.push("lian-li-gtk");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    dir.push("debug.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(dir) {
+        let now = glib::DateTime::now_local().map(|d| d.format("%F %T").unwrap_or_default().to_string());
+        let _ = writeln!(file, "[{}] {message}", now.unwrap_or_default());
+    }
+}
+
 impl Ctx {
     pub fn toast(&self, message: &str) {
+        log_toast(message);
         let toast = adw::Toast::new(message);
         toast.set_timeout(TOAST_TIMEOUT_SECS);
         self.toast_overlay.add_toast(toast);
     }
 
     pub fn toast_with_button(&self, message: &str, button_label: &str, on_click: impl Fn() + 'static) {
+        log_toast(message);
         let toast = adw::Toast::new(message);
         toast.set_timeout(TOAST_TIMEOUT_SECS);
         toast.set_button_label(Some(button_label));
@@ -393,6 +413,18 @@ impl Ctx {
         }
         map.insert(device_id.to_string(), LastEffect::Static(merged));
         crate::last_effect::save(&map);
+    }
+
+    /// Drops the recorded effect for a device entirely — used before a
+    /// per-zone `SetRgbDirect` apply (Segments on a multi-zone device) that
+    /// has no `LastEffect` representation of its own, so a stale entry left
+    /// over from whatever ran before doesn't linger and get replayed by
+    /// `identify::spawn_frame_heartbeat` every `HEARTBEAT_SECS`.
+    pub fn clear_last_effect(&self, device_id: &str) {
+        let mut map = self.last_effect.borrow_mut();
+        if map.remove(device_id).is_some() {
+            crate::last_effect::save(&map);
+        }
     }
 
     pub fn last_effect_for(&self, device_id: &str) -> Option<LastEffect> {

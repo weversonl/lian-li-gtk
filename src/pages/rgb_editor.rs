@@ -585,61 +585,63 @@ fn build_editor(
     brightness_row.add_suffix(&slider_wrap(&brightness_scale, |v| format!("{v:.0}%")));
     sliders_group.add(&brightness_row);
 
-    let fps_row = adw::ActionRow::builder()
-        .title(ctx.t("ge.fps"))
-        .subtitle(ctx.t("ge.fps_subtitle"))
-        .build();
-    let fps_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 5.0, 60.0, 1.0);
-    fps_scale.set_value(state.borrow().fps);
-    fps_scale.set_hexpand(false);
-    fps_scale.add_mark(15.0, gtk::PositionType::Bottom, Some("15"));
-    fps_scale.add_mark(30.0, gtk::PositionType::Bottom, Some("30"));
-    fps_scale.add_mark(60.0, gtk::PositionType::Bottom, Some("60"));
-    if state.borrow().fps > 60.0 {
-        fps_scale.set_range(5.0, 120.0);
-        fps_scale.add_mark(120.0, gtk::PositionType::Bottom, Some("120"));
-        fps_scale.add_css_class("fps-warning-zone");
-    }
-    {
-        let state = state.clone();
-        fps_scale.connect_value_changed(move |s| {
-            state.borrow_mut().fps = s.value();
-        });
-    }
+    if crate::effects::SHOW_FPS_CONTROL {
+        let fps_row = adw::ActionRow::builder()
+            .title(ctx.t("ge.fps"))
+            .subtitle(ctx.t("ge.fps_subtitle"))
+            .build();
+        let fps_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 5.0, 60.0, 1.0);
+        fps_scale.set_value(state.borrow().fps);
+        fps_scale.set_hexpand(false);
+        fps_scale.add_mark(15.0, gtk::PositionType::Bottom, Some("15"));
+        fps_scale.add_mark(30.0, gtk::PositionType::Bottom, Some("30"));
+        fps_scale.add_mark(60.0, gtk::PositionType::Bottom, Some("60"));
+        if state.borrow().fps > 60.0 {
+            fps_scale.set_range(5.0, 120.0);
+            fps_scale.add_mark(120.0, gtk::PositionType::Bottom, Some("120"));
+            fps_scale.add_css_class("fps-warning-zone");
+        }
+        {
+            let state = state.clone();
+            fps_scale.connect_value_changed(move |s| {
+                state.borrow_mut().fps = s.value();
+            });
+        }
 
-    let fps_range_row = adw::ActionRow::builder().title(ctx.t("ge.over_60fps")).build();
-    let initial_extended = state.borrow().fps > 60.0;
-    let fps_range_switch =
-        gtk::Switch::builder().valign(gtk::Align::Center).active(initial_extended).build();
-    {
-        let fps_scale = fps_scale.clone();
-        fps_range_switch.connect_state_set(move |_, extended| {
-            fps_scale.clear_marks();
-            if extended {
-                fps_scale.set_range(5.0, 120.0);
-                fps_scale.add_mark(15.0, gtk::PositionType::Bottom, Some("15"));
-                fps_scale.add_mark(30.0, gtk::PositionType::Bottom, Some("30"));
-                fps_scale.add_mark(60.0, gtk::PositionType::Bottom, Some("60"));
-                fps_scale.add_mark(120.0, gtk::PositionType::Bottom, Some("120"));
-                fps_scale.add_css_class("fps-warning-zone");
-            } else {
-                if fps_scale.value() > 60.0 {
-                    fps_scale.set_value(60.0);
+        let fps_range_row = adw::ActionRow::builder().title(ctx.t("ge.over_60fps")).build();
+        let initial_extended = state.borrow().fps > 60.0;
+        let fps_range_switch =
+            gtk::Switch::builder().valign(gtk::Align::Center).active(initial_extended).build();
+        {
+            let fps_scale = fps_scale.clone();
+            fps_range_switch.connect_state_set(move |_, extended| {
+                fps_scale.clear_marks();
+                if extended {
+                    fps_scale.set_range(5.0, 120.0);
+                    fps_scale.add_mark(15.0, gtk::PositionType::Bottom, Some("15"));
+                    fps_scale.add_mark(30.0, gtk::PositionType::Bottom, Some("30"));
+                    fps_scale.add_mark(60.0, gtk::PositionType::Bottom, Some("60"));
+                    fps_scale.add_mark(120.0, gtk::PositionType::Bottom, Some("120"));
+                    fps_scale.add_css_class("fps-warning-zone");
+                } else {
+                    if fps_scale.value() > 60.0 {
+                        fps_scale.set_value(60.0);
+                    }
+                    fps_scale.set_range(5.0, 60.0);
+                    fps_scale.add_mark(15.0, gtk::PositionType::Bottom, Some("15"));
+                    fps_scale.add_mark(30.0, gtk::PositionType::Bottom, Some("30"));
+                    fps_scale.add_mark(60.0, gtk::PositionType::Bottom, Some("60"));
+                    fps_scale.remove_css_class("fps-warning-zone");
                 }
-                fps_scale.set_range(5.0, 60.0);
-                fps_scale.add_mark(15.0, gtk::PositionType::Bottom, Some("15"));
-                fps_scale.add_mark(30.0, gtk::PositionType::Bottom, Some("30"));
-                fps_scale.add_mark(60.0, gtk::PositionType::Bottom, Some("60"));
-                fps_scale.remove_css_class("fps-warning-zone");
-            }
-            glib::Propagation::Proceed
-        });
-    }
-    fps_range_row.add_suffix(&fps_range_switch);
-    sliders_group.add(&fps_range_row);
+                glib::Propagation::Proceed
+            });
+        }
+        fps_range_row.add_suffix(&fps_range_switch);
+        sliders_group.add(&fps_range_row);
 
-    fps_row.add_suffix(&slider_wrap(&fps_scale, |v| format!("{v:.0}")));
-    sliders_group.add(&fps_row);
+        fps_row.add_suffix(&slider_wrap(&fps_scale, |v| format!("{v:.0}")));
+        sliders_group.add(&fps_row);
+    }
 
     let meteor_pause_row = adw::ActionRow::builder()
         .title(ctx.t("rgb_editor.meteor_pause"))
@@ -1156,6 +1158,7 @@ fn build_editor(
     root.append(&scrolled);
 
     let zone_count = caps.zones.len();
+    let has_render_profile = caps.render_profile.is_some();
     let ctx = ctx.clone();
     let device_id = device_id.to_string();
     let do_apply = {
@@ -1227,45 +1230,94 @@ fn build_editor(
                 },
             );
 
-            let zones: Vec<u8> =
-                if apply_to_all { (0..zone_count as u8).collect() } else { vec![zone] };
+            let all_zones: Vec<u8> = (0..zone_count as u8).collect();
+            let zones: Vec<u8> = if apply_to_all { all_zones.clone() } else { vec![zone] };
 
             if segments_enabled {
-                // A Segments effect zone loops forever (see `apply_segments`),
-                // so each one needs its own independent task — awaiting them
-                // in sequence would starve every zone after the first.
-                for target_zone in zones {
+                // Segments is client-rendered (`SetRgbFrames`/`SetRgbDirect`
+                // per zone via `apply_segments`), not the daemon's grouped
+                // `SetRgbEffect` path below — it has no "zone 0 only"
+                // restriction, so it always loops every physical zone
+                // regardless of render profile.
+                let need_animation = middle_kind == MiddleKind::Effect || edge_kind == MiddleKind::Effect;
+                if need_animation {
+                    // An animated Segments zone loops forever (see
+                    // `apply_segments`), so each one needs its own
+                    // independent task — awaiting them in sequence would
+                    // starve every zone after the first.
+                    for target_zone in zones {
+                        let ctx = ctx.clone();
+                        let device_id = device_id.clone();
+                        glib::spawn_future_local(async move {
+                            apply_segments(
+                                &ctx,
+                                &device_id,
+                                is_wireless,
+                                target_zone,
+                                edge_by_strip,
+                                edge_count,
+                                edge_color,
+                                edge_start,
+                                edge_end,
+                                edge_brightness_percent,
+                                edge_kind,
+                                edge_mode,
+                                edge_colors,
+                                middle_kind,
+                                middle_color,
+                                middle_mode,
+                                middle_colors,
+                                middle_brightness_percent,
+                                speed_percent,
+                                fps,
+                                meteor_pause_secs,
+                                direction,
+                                invert_direction,
+                                meteor_circular,
+                                strip_count,
+                            )
+                            .await;
+                        });
+                    }
+                } else {
+                    // A static Segments apply completes and returns — like
+                    // the plain-effect path below, concurrent `SetRgbDirect`
+                    // calls to different zones of the same device race on
+                    // the daemon's per-device render/upload cache and clobber
+                    // each other, so these share one task and go one at a time.
                     let ctx = ctx.clone();
                     let device_id = device_id.clone();
                     glib::spawn_future_local(async move {
-                        apply_segments(
-                            &ctx,
-                            &device_id,
-                            is_wireless,
-                            target_zone,
-                            edge_by_strip,
-                            edge_count,
-                            edge_color,
-                            edge_start,
-                            edge_end,
-                            edge_brightness_percent,
-                            edge_kind,
-                            edge_mode,
-                            edge_colors,
-                            middle_kind,
-                            middle_color,
-                            middle_mode,
-                            middle_colors,
-                            middle_brightness_percent,
-                            speed_percent,
-                            fps,
-                            meteor_pause_secs,
-                            direction,
-                            invert_direction,
-                            meteor_circular,
-                            strip_count,
-                        )
-                        .await;
+                        for target_zone in zones {
+                            apply_segments(
+                                &ctx,
+                                &device_id,
+                                is_wireless,
+                                target_zone,
+                                edge_by_strip,
+                                edge_count,
+                                edge_color,
+                                edge_start,
+                                edge_end,
+                                edge_brightness_percent,
+                                edge_kind,
+                                edge_mode,
+                                edge_colors,
+                                middle_kind,
+                                middle_color,
+                                middle_mode,
+                                middle_colors,
+                                middle_brightness_percent,
+                                speed_percent,
+                                fps,
+                                meteor_pause_secs,
+                                direction,
+                                invert_direction,
+                                meteor_circular,
+                                strip_count,
+                            )
+                            .await;
+                        }
                     });
                 }
                 return;
@@ -1277,10 +1329,31 @@ fn build_editor(
             // physical wired hub race on its HID buffer and clobber each
             // other (this is exactly what motivated serializing the
             // reconnect heartbeat in identify.rs — see its doc comment).
+            //
+            // A wireless animated mode (Rainbow, Meteor, ...) renders client-side
+            // and streams via `SetRgbFrames`, which has no zone restriction — every
+            // other mode goes through `SetRgbEffect`, which a device with a render
+            // profile (grouped/software-rendered zones, e.g. SL-INF fan hubs) only
+            // accepts at zone 0 for non-Direct modes.
+            let uses_set_rgb_effect = !(is_wireless && WIRELESS_ANIMATED_MODES.contains(&mode));
+            let zones: Vec<u8> = if apply_to_all && uses_set_rgb_effect && has_render_profile && mode != RgbMode::Direct
+            {
+                vec![0]
+            } else {
+                zones
+            };
             let ctx = ctx.clone();
             let device_id = device_id.clone();
             let rgb_device_id = rgb_device_id.clone();
             glib::spawn_future_local(async move {
+                // Persisting once per zone here used to mean one GetConfig/SetConfig
+                // round-trip per zone for a multi-zone "apply to all" — the daemon
+                // now reopens the whole wired device (and replays every device's RGB
+                // config, wireless included) on every SetConfig, so 4 zones meant 4
+                // full reinits: fans visibly ramp and wireless RGB drops out mid-loop.
+                // Collect and persist once after the loop instead.
+                let mut persisted_zone_effects: Vec<(u8, RgbEffect)> = Vec::new();
+                let mut any_failed = false;
                 for target_zone in zones {
                     if is_wireless && WIRELESS_ANIMATED_MODES.contains(&mode) {
                         apply_wireless_animation(
@@ -1301,19 +1374,28 @@ fn build_editor(
                         continue;
                     }
 
-                    // Wireless ignores `RgbEffect.brightness`, so bake it into the color.
-                    let effect_colors: Vec<[u8; 3]> = if is_wireless {
+                    // Static/Breathing are single-color everywhere. Wired: sending
+                    // the full 8-slot gradient array (leftover from switching from
+                    // a gradient mode) makes the ENE6K77 driver treat it as its
+                    // "colorful corners" palette on dual-ring fans instead of a
+                    // solid fill (only the inner ring gets the picked color), so
+                    // it needs exactly 1 color. Wireless (SL-INF/CL/SL V4/SL
+                    // Wireless): the daemon's palette only overwrites as many of
+                    // its 4 default rainbow slots as we send — 1 color leaves the
+                    // other 3 defaulted, so it needs the same color 4 times for a
+                    // uniform fill (also caps at 4 colors either way). Wireless
+                    // also ignores `RgbEffect.brightness`, so bake it into the
+                    // color(s) actually sent.
+                    let effect_colors: Vec<[u8; 3]> = if matches!(mode, RgbMode::Static | RgbMode::Breathing) {
+                        let base = colors[0];
+                        if is_wireless {
+                            vec![scale_color(base, brightness_percent / 100.0); 4]
+                        } else {
+                            vec![base]
+                        }
+                    } else if is_wireless {
                         let factor = brightness_percent / 100.0;
                         colors.iter().map(|c| scale_color(*c, factor)).collect()
-                    } else if matches!(mode, RgbMode::Static | RgbMode::Breathing) {
-                        // Static/Breathing are single-color everywhere — sending the
-                        // full 8-slot gradient array (leftover from switching from a
-                        // gradient mode) makes the ENE6K77 driver treat it as its
-                        // "colorful corners" palette on dual-ring fans instead of a
-                        // solid fill, so only the fan's inner ring ends up the color
-                        // the user picked while the outer ring shows old gradient
-                        // colors (or is skipped for modes without an outer variant).
-                        vec![colors[0]]
                     } else {
                         colors.to_vec()
                     };
@@ -1335,12 +1417,19 @@ fn build_editor(
                     match ctx.client.call_unit(request).await {
                         Ok(()) => {
                             ctx.record_static_effect(&device_id, vec![(target_zone, effect.clone())]);
-                            crate::rgb_persist::persist_rgb_effect(&ctx, &device_id, vec![(target_zone, effect)])
-                                .await;
-                            ctx.toast(ctx.t("rgb_editor.effect_applied"));
+                            persisted_zone_effects.push((target_zone, effect));
                         }
-                        Err(e) => ctx.toast(&format!("{}: {e}", ctx.t("rgb_editor.failed_apply"))),
+                        Err(e) => {
+                            any_failed = true;
+                            ctx.toast(&format!("{}: {e}", ctx.t("rgb_editor.failed_apply")));
+                        }
                     }
+                }
+                if !persisted_zone_effects.is_empty() {
+                    crate::rgb_persist::persist_rgb_effect(&ctx, &rgb_device_id, persisted_zone_effects).await;
+                }
+                if !any_failed {
+                    ctx.toast(ctx.t("rgb_editor.effect_applied"));
                 }
             });
         }
@@ -1728,9 +1817,15 @@ pub(crate) async fn apply_segments(
 
     // Same as `apply_wireless_animation` — clears any stale Static entry
     // so the daemon's idle-watchdog auto-resync doesn't push it back over
-    // this animation (see `rgb_persist`).
+    // this animation (see `rgb_persist`). Also drops the client-side
+    // `LastEffect` (see `Ctx::clear_last_effect`): the multi-zone
+    // `SetRgbDirect` branch below never records one of its own, so a
+    // leftover entry from whatever ran before Segments (e.g. a `Frames`
+    // effect like Rainbow) would otherwise keep getting replayed over this
+    // by `identify::spawn_frame_heartbeat` every 20s.
     if is_wireless {
         crate::rgb_persist::clear_wireless_rgb_configs(ctx, std::slice::from_ref(&device_id.to_string())).await;
+        ctx.clear_last_effect(device_id);
     }
 
     // A single-zone wireless device (e.g. a Strimer cable) has no per-zone
@@ -1947,6 +2042,9 @@ mod tests {
             supported_scopes: Vec::new(),
             supports_direction: false,
             rf_owned: false,
+            fan_led_count_control: None,
+            deferred_reason: None,
+            hardware_group_effects: false,
         }
     }
 

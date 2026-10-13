@@ -27,6 +27,7 @@ fn upsert_zones(config: &mut AppConfig, device_id: &str, zone_effects: Vec<(u8, 
                 zones: Vec::new(),
                 regions: None,
                 effect_memory: Vec::new(),
+                fan_led_count: None,
             });
             rgb.devices.len() - 1
         }
