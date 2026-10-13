@@ -585,6 +585,16 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         (Lang::PtBr, "profiles.delete") => "Apagar",
         (Lang::En, "profiles.deleted") => "Profile deleted",
         (Lang::PtBr, "profiles.deleted") => "Perfil apagado",
+        (Lang::En, "profiles.active") => "Active",
+        (Lang::PtBr, "profiles.active") => "Ativo",
+        (Lang::En, "profiles.active_modified") => "Active — modified",
+        (Lang::PtBr, "profiles.active_modified") => "Ativo — modificado",
+        (Lang::En, "profiles.save_changes") => "Save changes to this profile",
+        (Lang::PtBr, "profiles.save_changes") => "Salvar alterações neste perfil",
+        (Lang::En, "profiles.dismiss_changes") => "Dismiss — keep the saved profile as is",
+        (Lang::PtBr, "profiles.dismiss_changes") => "Ignorar — manter o perfil salvo como está",
+        (Lang::En, "profiles.use_at_startup") => "Apply this profile automatically on launch",
+        (Lang::PtBr, "profiles.use_at_startup") => "Aplicar este perfil automaticamente ao iniciar",
 
         // ---- tray.rs / window.rs (background + tray) ----
         (Lang::En, "tray.show_hide") => "Show/Hide",

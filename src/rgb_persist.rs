@@ -9,7 +9,7 @@
 use crate::context::Ctx;
 use lianli_shared::config::AppConfig;
 use lianli_shared::ipc::IpcRequest;
-use lianli_shared::rgb::{RgbDeviceConfig, RgbEffect, RgbMode, RgbZoneConfig};
+use lianli_shared::rgb::{RgbDeviceConfig, RgbEffect, RgbMode, RgbScope, RgbZoneConfig};
 use std::rc::Rc;
 
 fn upsert_zones(config: &mut AppConfig, device_id: &str, zone_effects: Vec<(u8, RgbEffect)>) {
@@ -34,16 +34,28 @@ fn upsert_zones(config: &mut AppConfig, device_id: &str, zone_effects: Vec<(u8, 
     };
     let dev_cfg = &mut rgb.devices[dev_index];
 
+    // Keyed by (zone, scope), not zone alone — a dual-ring fan (e.g. SL
+    // Infinity) applies Inner and Outer as two separate calls for the *same*
+    // zone, and each needs its own persisted entry. Matching by zone_index
+    // alone made the second call silently clobber the first, so one ring's
+    // color never reached the daemon. A new `RgbScope::All` entry for a zone
+    // supersedes (and clears) any Inner/Outer entries, and vice versa, since
+    // `All` overwrites the whole zone on the device — same merge rule as
+    // `Ctx::record_static_effect`'s client-side cache.
     for (zone, effect) in zone_effects {
-        match dev_cfg.zones.iter().position(|z| z.zone_index == zone) {
-            Some(i) => dev_cfg.zones[i].effect = effect,
-            None => dev_cfg.zones.push(RgbZoneConfig {
-                zone_index: zone,
-                effect,
-                swap_lr: false,
-                swap_tb: false,
-            }),
+        if effect.scope == RgbScope::All {
+            dev_cfg.zones.retain(|z| z.zone_index != zone);
+        } else {
+            dev_cfg
+                .zones
+                .retain(|z| !(z.zone_index == zone && (z.effect.scope == effect.scope || z.effect.scope == RgbScope::All)));
         }
+        dev_cfg.zones.push(RgbZoneConfig {
+            zone_index: zone,
+            effect,
+            swap_lr: false,
+            swap_tb: false,
+        });
     }
 }
 

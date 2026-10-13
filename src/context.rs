@@ -9,7 +9,7 @@ use crate::pages::rgb_editor::MiddleKind;
 use gtk::glib;
 use lianli_shared::ipc::DeviceInfo;
 use lianli_shared::rgb::{RgbDirection, RgbEffect, RgbMode, RgbScope};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -151,6 +151,13 @@ pub struct Ctx {
     /// `SetRgbDirect` calls — see `pages::rgb_editor::apply_segments`) know
     /// to stop once its zone has been re-applied from under it.
     pub segment_anim_gen: Rc<RefCell<HashMap<String, u64>>>,
+    /// Name of the profile last applied this session, if any — see
+    /// `Ctx::mark_profile_dirty`. Not persisted: unknown again after a
+    /// restart unless `startup_profile` auto-applies one.
+    pub active_profile: Rc<RefCell<Option<String>>>,
+    /// Set once something changes state after `active_profile` was applied,
+    /// cleared again on the next apply/save of that profile.
+    pub profile_dirty: Rc<Cell<bool>>,
 }
 
 #[allow(dead_code)]
@@ -535,5 +542,43 @@ impl Ctx {
         let mut profiles = crate::profiles::load();
         profiles.retain(|p| p.name != name);
         crate::profiles::save(&profiles);
+        if self.active_profile.borrow().as_deref() == Some(name) {
+            *self.active_profile.borrow_mut() = None;
+            self.profile_dirty.set(false);
+        }
+    }
+
+    pub fn startup_profile(&self) -> Option<String> {
+        self.app_prefs.borrow().startup_profile.clone()
+    }
+
+    pub fn set_startup_profile(&self, name: Option<String>) {
+        let mut prefs = self.app_prefs.borrow_mut();
+        prefs.startup_profile = name;
+        crate::app_prefs::save(&prefs);
+    }
+
+    pub fn active_profile(&self) -> Option<String> {
+        self.active_profile.borrow().clone()
+    }
+
+    /// Marks `name` as the currently-applied profile and clears the dirty
+    /// flag — call once right after successfully applying or (re)saving it.
+    pub fn set_active_profile(&self, name: Option<String>) {
+        *self.active_profile.borrow_mut() = name;
+        self.profile_dirty.set(false);
+    }
+
+    pub fn is_profile_dirty(&self) -> bool {
+        self.profile_dirty.get()
+    }
+
+    /// Call after any hardware-state-changing apply (RGB, fan curve, LCD).
+    /// No-op when no profile is active — avoids ever showing "modified" for
+    /// a session where the user never applied one.
+    pub fn mark_profile_dirty(&self) {
+        if self.active_profile.borrow().is_some() {
+            self.profile_dirty.set(true);
+        }
     }
 }

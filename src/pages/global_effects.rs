@@ -1094,6 +1094,7 @@ async fn apply_global_effect(
     }
 
     crate::rgb_persist::persist_rgb_effects(ctx, to_persist).await;
+    ctx.mark_profile_dirty();
 
     if failed == 0 {
         ctx.toast(&format!(

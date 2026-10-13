@@ -53,6 +53,9 @@ pub struct AppPrefs {
     /// Device auto-selected on startup. `None` = first in `device_order`.
     #[serde(default)]
     pub default_device_id: Option<String>,
+    /// Profile name to auto-apply once on launch — see `Ctx::startup_profile`.
+    #[serde(default)]
+    pub startup_profile: Option<String>,
     /// Last non-maximized main window size, saved on close.
     #[serde(default = "default_window_width")]
     pub window_width: i32,
@@ -121,6 +124,7 @@ impl Default for AppPrefs {
             global_effect_meteor_pause_secs: default_meteor_pause_secs(),
             global_effect_sync_devices: false,
             default_device_id: None,
+            startup_profile: None,
             window_width: default_window_width(),
             window_height: default_window_height(),
         }

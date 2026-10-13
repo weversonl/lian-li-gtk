@@ -72,7 +72,16 @@ pub fn page(ctx: &Rc<Ctx>) -> adw::NavigationPage {
     scrolled.set_child(Some(&clamp));
     toolbar.set_content(Some(&scrolled));
 
-    adw::NavigationPage::builder().title(ctx.t("profiles.title")).tag("profiles").child(&toolbar).build()
+    let page = adw::NavigationPage::builder().title(ctx.t("profiles.title")).tag("profiles").child(&toolbar).build();
+    // This page is a nav singleton (see `push_singleton`) — built once and
+    // popped back to, never rebuilt. "shown" fires every time it becomes the
+    // visible page again, which is the only way the active/dirty indicators
+    // (changed by RGB/fan-curve/LCD applies on other pages) pick up here.
+    {
+        let refresh = refresh.clone();
+        page.connect_shown(move |_| refresh());
+    }
+    page
 }
 
 fn populate_profiles(list_box: &gtk::ListBox, ctx: &Rc<Ctx>) {
@@ -87,7 +96,89 @@ fn populate_profiles(list_box: &gtk::ListBox, ctx: &Rc<Ctx>) {
     }
 
     for profile in profiles {
+        let is_active = ctx.active_profile().as_deref() == Some(profile.name.as_str());
+        let is_dirty = is_active && ctx.is_profile_dirty();
+        let is_startup = ctx.startup_profile().as_deref() == Some(profile.name.as_str());
+
         let row = adw::ActionRow::builder().title(profile.name.clone()).build();
+        if is_dirty {
+            row.set_subtitle(ctx.t("profiles.active_modified"));
+        } else if is_active {
+            row.set_subtitle(ctx.t("profiles.active"));
+        }
+
+        let refresh: Rc<dyn Fn()> = {
+            let list_box = list_box.clone();
+            let ctx_for_refresh = ctx.clone();
+            Rc::new(move || populate_profiles(&list_box, &ctx_for_refresh))
+        };
+
+        if is_dirty {
+            let save_button = gtk::Button::builder()
+                .icon_name("document-save-symbolic")
+                .valign(gtk::Align::Center)
+                .css_classes(["flat", "circular"])
+                .tooltip_text(ctx.t("profiles.save_changes"))
+                .build();
+            {
+                let ctx = ctx.clone();
+                let name = profile.name.clone();
+                let refresh = refresh.clone();
+                save_button.connect_clicked(move |_| {
+                    let ctx = ctx.clone();
+                    let name = name.clone();
+                    let refresh = refresh.clone();
+                    glib::spawn_future_local(async move {
+                        match capture_profile(&ctx, name).await {
+                            Ok(profile) => {
+                                ctx.set_active_profile(Some(profile.name.clone()));
+                                ctx.save_profile(profile);
+                                ctx.toast(ctx.t("profiles.saved"));
+                                refresh();
+                            }
+                            Err(_) => ctx.toast(ctx.t("profiles.failed_capture")),
+                        }
+                    });
+                });
+            }
+            row.add_suffix(&save_button);
+
+            let dismiss_button = gtk::Button::builder()
+                .icon_name("window-close-symbolic")
+                .valign(gtk::Align::Center)
+                .css_classes(["flat", "circular"])
+                .tooltip_text(ctx.t("profiles.dismiss_changes"))
+                .build();
+            {
+                let ctx = ctx.clone();
+                let refresh = refresh.clone();
+                dismiss_button.connect_clicked(move |_| {
+                    ctx.profile_dirty.set(false);
+                    refresh();
+                });
+            }
+            row.add_suffix(&dismiss_button);
+        }
+
+        let startup_button = gtk::ToggleButton::builder()
+            .icon_name(if is_startup { "starred-symbolic" } else { "non-starred-symbolic" })
+            .valign(gtk::Align::Center)
+            .css_classes(["flat", "circular"])
+            .active(is_startup)
+            .tooltip_text(ctx.t("profiles.use_at_startup"))
+            .build();
+        {
+            let ctx = ctx.clone();
+            let name = profile.name.clone();
+            let refresh = refresh.clone();
+            startup_button.connect_clicked(move |button| {
+                let now_startup = ctx.startup_profile().as_deref() != Some(name.as_str());
+                ctx.set_startup_profile(if now_startup { Some(name.clone()) } else { None });
+                button.set_icon_name(if now_startup { "starred-symbolic" } else { "non-starred-symbolic" });
+                refresh();
+            });
+        }
+        row.add_suffix(&startup_button);
 
         let apply_button = gtk::Button::builder()
             .label(ctx.t("profiles.apply"))
@@ -117,11 +208,6 @@ fn populate_profiles(list_box: &gtk::ListBox, ctx: &Rc<Ctx>) {
 
         {
             let ctx = ctx.clone();
-            let refresh: Rc<dyn Fn()> = {
-                let list_box = list_box.clone();
-                let ctx_for_refresh = ctx.clone();
-                Rc::new(move || populate_profiles(&list_box, &ctx_for_refresh))
-            };
             let name = profile.name.clone();
             delete_button.connect_clicked(move |button| {
                 let Some(window) = button.root().and_then(|r| r.downcast::<gtk::Window>().ok()) else {
@@ -171,6 +257,7 @@ fn open_save_dialog(parent: &gtk::Window, ctx: &Rc<Ctx>, refresh: Rc<dyn Fn()>) 
             ctx.toast(ctx.t("profiles.capturing"));
             match capture_profile(&ctx, name).await {
                 Ok(profile) => {
+                    ctx.set_active_profile(Some(profile.name.clone()));
                     ctx.save_profile(profile);
                     ctx.toast(ctx.t("profiles.saved"));
                     refresh();
@@ -229,7 +316,7 @@ async fn capture_profile(ctx: &Rc<Ctx>, name: String) -> Result<Profile, ()> {
 /// then the client-side extras that `SetConfig` doesn't cover, then replays
 /// wireless animated/segments state via the same path `identify::reapply_last_effect`
 /// already uses for reconnects.
-async fn apply_profile(ctx: &Rc<Ctx>, profile: &Profile) {
+pub(crate) async fn apply_profile(ctx: &Rc<Ctx>, profile: &Profile) {
     let mut ok = 0usize;
     let mut failed = 0usize;
 
@@ -237,6 +324,7 @@ async fn apply_profile(ctx: &Rc<Ctx>, profile: &Profile) {
         ctx.toast(ctx.t("profiles.failed_capture"));
         return;
     }
+    ctx.set_active_profile(Some(profile.name.clone()));
 
     ctx.replace_rgb_prefs(profile.rgb_prefs.clone());
     ctx.replace_editor_snapshots(profile.editor_snapshots.clone());

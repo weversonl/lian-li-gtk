@@ -254,6 +254,7 @@ impl Ui {
             fans.speeds.push(FanGroup { device_id: Some(self.hub_id.clone()), speeds: [speed.clone(), speed.clone(), speed.clone(), speed] });
         }
         drop(cfg);
+        self.ctx.mark_profile_dirty();
         self.ctx.toast(self.ctx.t("fc.assignment_changed"));
         self.refresh_curve_list();
     }
@@ -543,6 +544,7 @@ fn build_editor(
             }
             drop(cfg);
             if !is_custom_command {
+                ui_cb.ctx.mark_profile_dirty();
                 ui_cb.ctx.toast(ui_cb.ctx.t("fc.source_changed"));
             }
         });
@@ -663,6 +665,7 @@ fn build_editor(
             *ui.selected_curve.borrow_mut() = owned.first().copied();
             ui.refresh_curve_list();
             ui.refresh_curve_dependent();
+            ui.ctx.mark_profile_dirty();
             ui.ctx.toast(ui.ctx.t("fc.curve_removed"));
         });
     }
@@ -705,7 +708,10 @@ fn build_editor(
                     ui.ctx.toast(ui.ctx.t("fc.names_deduped"));
                 }
                 match ui.ctx.client.call_unit(IpcRequest::SetConfig { config: Box::new(config) }).await {
-                    Ok(()) => ui.ctx.toast(ui.ctx.t("fc.curves_saved")),
+                    Ok(()) => {
+                        ui.ctx.mark_profile_dirty();
+                        ui.ctx.toast(ui.ctx.t("fc.curves_saved"));
+                    }
                     Err(e) => ui.ctx.toast(&format!("{}: {e}", ui.ctx.t("fc.failed_save"))),
                 }
             });

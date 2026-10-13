@@ -131,12 +131,28 @@ pub fn build_ui(app: &adw::Application) {
         last_effect: Rc::new(RefCell::new(crate::last_effect::load())),
         editor_snapshots: Rc::new(RefCell::new(crate::editor_snapshots::load())),
         segment_anim_gen: Rc::new(RefCell::new(HashMap::new())),
+        active_profile: Rc::new(RefCell::new(None)),
+        profile_dirty: Rc::new(Cell::new(false)),
     });
 
     {
         let ctx = ctx.clone();
         glib::spawn_future_local(async move {
             crate::rgb_persist::clear_stale_wireless_animations(&ctx).await;
+        });
+    }
+
+    if let Some(name) = ctx.startup_profile() {
+        let ctx = ctx.clone();
+        glib::spawn_future_local(async move {
+            // Needs an initial device list before replaying wireless state —
+            // `start_polling`'s own first poll races this, so fetch here too.
+            if let Ok(devices) = ctx.client.call::<Vec<DeviceInfo>>(lianli_shared::ipc::IpcRequest::ListDevices).await {
+                ctx.state.borrow_mut().devices = devices;
+            }
+            if let Some(profile) = ctx.profiles().into_iter().find(|p| p.name == name) {
+                profiles::apply_profile(&ctx, &profile).await;
+            }
         });
     }
 

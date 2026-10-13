@@ -265,11 +265,22 @@ fn build_editor(
 
     let saved_prefs = ctx.rgb_prefs_for(&device_id);
     let snapshot = ctx.editor_snapshot_for(&device_id);
+    // `selectable_modes` comes straight from the daemon's `supported_modes`,
+    // which now lists `Off` first for ENE6K77 — defaulting to "whatever's
+    // first" with no saved snapshot would pre-select Off and, if applied
+    // without touching the dropdown, turn the zone's LEDs off outright.
+    // Static is always a safe, visible fallback when available.
     let initial_mode = snapshot
         .as_ref()
         .map(|s| s.mode)
         .filter(|m| selectable_modes.contains(m))
-        .unwrap_or_else(|| selectable_modes.first().copied().unwrap_or(RgbMode::Static));
+        .unwrap_or_else(|| {
+            if selectable_modes.contains(&RgbMode::Static) {
+                RgbMode::Static
+            } else {
+                selectable_modes.first().copied().unwrap_or(RgbMode::Static)
+            }
+        });
     let state = Rc::new(RefCell::new(EditorState {
         mode: initial_mode,
         direction: snapshot.as_ref().map(|s| s.direction).unwrap_or(saved_prefs.direction),
@@ -1429,6 +1440,7 @@ fn build_editor(
                     crate::rgb_persist::persist_rgb_effect(&ctx, &rgb_device_id, persisted_zone_effects).await;
                 }
                 if !any_failed {
+                    ctx.mark_profile_dirty();
                     ctx.toast(ctx.t("rgb_editor.effect_applied"));
                 }
             });
@@ -1584,6 +1596,7 @@ async fn apply_wireless_animation(
             ctx.record_frames(device_id, frames, interval_ms, mode);
             // Not persisted to AppConfig — SetConfig would push a static
             // snapshot via RF and halt this animation. See rgb_persist.
+            ctx.mark_profile_dirty();
             ctx.toast(ctx.t("rgb_editor.effect_applied"));
         }
         Err(e) => ctx.toast(&format!("{}: {e}", ctx.t("rgb_editor.failed_apply"))),
@@ -1889,6 +1902,7 @@ pub(crate) async fn apply_segments(
         match ctx.client.call_unit(request).await {
             Ok(()) => {
                 ctx.record_frames(device_id, frames, interval_ms, middle_mode);
+                ctx.mark_profile_dirty();
                 ctx.toast(ctx.t("rgb_editor.segments_applied"));
             }
             Err(e) => ctx.toast(&format!("{}: {e}", ctx.t("rgb_editor.failed_apply"))),
@@ -1905,6 +1919,64 @@ pub(crate) async fn apply_segments(
         }
         let key = format!("{device_id}:{zone}");
         let need_animation = middle_kind == MiddleKind::Effect || edge_kind == MiddleKind::Effect;
+
+        // A device with a render profile (e.g. SL-INF fan hubs, wired or
+        // wireless) renders Inner/Outer rings natively via `SetRgbEffect`'s
+        // `scope` field — the same mechanism already used for wired zones.
+        // `combine_edge_middle_frames`'s edge/middle split assumes a linear
+        // strip (first/last N LEDs = edge), which doesn't match a fan's
+        // actual ring wiring order, so client-rendering it via `SetRgbDirect`
+        // put the colors on the wrong ring. Delegating solid-on-solid to the
+        // daemon's own ring-aware renderer sidesteps that entirely.
+        if let Some(profile) = dev_caps.render_profile.as_ref().filter(|_| !need_animation) {
+            let per_fan = (profile.fan_count as usize).max(1);
+            // Confirmed empirically: wireless SL-INF fan hubs report their
+            // rings with Inner/Outer swapped relative to what's visually the
+            // border vs. center (wired ENE6K77 fans use them the intuitive
+            // way round). Flip which scope gets the edge/middle color only
+            // for wireless, so "edge" always lands on the visual border.
+            let (edge_scope, middle_scope) =
+                if is_wireless { (RgbScope::Inner, RgbScope::Outer) } else { (RgbScope::Outer, RgbScope::Inner) };
+            let outer = RgbEffect {
+                mode: RgbMode::Static,
+                colors: vec![edge_color; per_fan],
+                speed: percent_to_speed4(speed_percent),
+                brightness: percent_to_brightness4(edge_brightness_percent),
+                direction,
+                scope: edge_scope,
+                disabled: false,
+            };
+            let inner = RgbEffect {
+                mode: RgbMode::Static,
+                colors: vec![middle_color; per_fan],
+                speed: percent_to_speed4(speed_percent),
+                brightness: percent_to_brightness4(middle_brightness_percent),
+                direction,
+                scope: middle_scope,
+                disabled: false,
+            };
+            let mut all_ok = true;
+            for effect in [outer.clone(), inner.clone()] {
+                let request =
+                    IpcRequest::SetRgbEffect { device_id: dev_caps.device_id.clone(), zone: 0, effect };
+                if ctx.client.call_unit(request).await.is_err() {
+                    all_ok = false;
+                }
+            }
+            if all_ok {
+                crate::rgb_persist::persist_rgb_effect(
+                    ctx,
+                    &dev_caps.device_id,
+                    vec![(0, outer), (0, inner)],
+                )
+                .await;
+                ctx.mark_profile_dirty();
+                ctx.toast(ctx.t("rgb_editor.segments_applied"));
+            } else {
+                ctx.toast(ctx.t("rgb_editor.failed_apply"));
+            }
+            return;
+        }
 
         if !need_animation {
             let my_gen = ctx.bump_segment_anim(&key);
@@ -1944,6 +2016,7 @@ pub(crate) async fn apply_segments(
                 Ok(()) => {
                     // Only claim the toast/gen if nothing newer pre-empted us meanwhile.
                     if ctx.segment_anim_current(&key) == my_gen {
+                        ctx.mark_profile_dirty();
                         ctx.toast(ctx.t("rgb_editor.segments_applied"));
                     }
                 }
@@ -1993,6 +2066,7 @@ pub(crate) async fn apply_segments(
         let interval = std::time::Duration::from_millis(anim_interval_ms as u64);
 
         let my_gen = ctx.bump_segment_anim(&key);
+        ctx.mark_profile_dirty();
         ctx.toast(ctx.t("rgb_editor.segments_applied"));
         let mut i = 0usize;
         loop {

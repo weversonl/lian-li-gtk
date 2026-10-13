@@ -181,7 +181,10 @@ fn build_editor(
         glib::spawn_future_local(async move {
             let request = IpcRequest::SetLcdMedia { device_id, config: Box::new(config) };
             match ctx.client.call_unit(request).await {
-                Ok(()) => ctx.toast(ctx.t("lcd.content_applied")),
+                Ok(()) => {
+                    ctx.mark_profile_dirty();
+                    ctx.toast(ctx.t("lcd.content_applied"));
+                }
                 Err(e) => ctx.toast(&format!("{}: {e}", ctx.t("lcd.failed_apply"))),
             }
         });
