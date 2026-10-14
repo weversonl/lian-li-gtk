@@ -108,7 +108,7 @@ impl IpcClient {
 
         match response {
             IpcResponse::Ok { data } => Ok(data),
-            IpcResponse::Error { message } => bail!("daemon error: {message}"),
+            IpcResponse::Error { message, .. } => bail!("daemon error: {message}"),
         }
     }
 }

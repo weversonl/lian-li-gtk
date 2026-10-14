@@ -2107,6 +2107,7 @@ mod tests {
             render_profile: None,
             zones: zone_leds.iter().map(|&led_count| lianli_shared::rgb::RgbZoneInfo {
                 name: String::new(),
+                name_ui: None,
                 led_count,
             }).collect(),
             supports_direct: false,
@@ -2118,6 +2119,7 @@ mod tests {
             rf_owned: false,
             fan_led_count_control: None,
             deferred_reason: None,
+            deferred_reason_ui: None,
             hardware_group_effects: false,
         }
     }
