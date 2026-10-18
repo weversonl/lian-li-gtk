@@ -12,9 +12,11 @@ use adw::prelude::*;
 use gtk::glib;
 use lianli_shared::device_id::DeviceFamily;
 use lianli_shared::ipc::{DeviceInfo, TelemetrySnapshot};
+use lianli_shared::rgb::RgbDeviceCapabilities;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Duration;
 
 pub fn build_ui(app: &adw::Application) {
     // GApplication routes a second launch to this same process via D-Bus,
@@ -145,14 +147,45 @@ pub fn build_ui(app: &adw::Application) {
     if let Some(name) = ctx.startup_profile() {
         let ctx = ctx.clone();
         glib::spawn_future_local(async move {
-            // Needs an initial device list before replaying wireless state —
-            // `start_polling`'s own first poll races this, so fetch here too.
-            if let Ok(devices) = ctx.client.call::<Vec<DeviceInfo>>(lianli_shared::ipc::IpcRequest::ListDevices).await {
-                ctx.state.borrow_mut().devices = devices;
+            let Some(profile) = ctx.profiles().into_iter().find(|p| p.name == name) else { return };
+
+            // Wireless devices only show up in ListDevices/GetRgbCapabilities
+            // a few seconds into the daemon's RF discovery loop — a single
+            // poll right at launch raced that and silently no-op'd each
+            // wireless zone ("caps not found"), leaving the fans with
+            // nothing applied until a manual re-apply. Poll both until every
+            // wireless device this profile touches is actually ready, or
+            // give up after a few seconds so a profile with an offline
+            // device doesn't stall startup forever.
+            let wanted: std::collections::HashSet<&String> = profile
+                .last_effect
+                .keys()
+                .chain(profile.editor_snapshots.keys())
+                .filter(|id| id.starts_with("wireless:"))
+                .collect();
+
+            const MAX_ATTEMPTS: u32 = 20;
+            for attempt in 0..MAX_ATTEMPTS {
+                let devices = ctx.client.call::<Vec<DeviceInfo>>(lianli_shared::ipc::IpcRequest::ListDevices).await;
+                let caps = ctx.client.call::<Vec<RgbDeviceCapabilities>>(lianli_shared::ipc::IpcRequest::GetRgbCapabilities).await;
+                if let Ok(devices) = &devices {
+                    ctx.state.borrow_mut().devices = devices.clone();
+                }
+                let ready = match (&devices, &caps) {
+                    (Ok(devices), Ok(caps)) => {
+                        let seen_devices: std::collections::HashSet<&String> = devices.iter().map(|d| &d.device_id).collect();
+                        let seen_caps: std::collections::HashSet<&String> = caps.iter().map(|c| &c.device_id).collect();
+                        wanted.iter().all(|id| seen_devices.contains(id) && seen_caps.contains(id))
+                    }
+                    _ => false,
+                };
+                if ready || attempt + 1 == MAX_ATTEMPTS {
+                    break;
+                }
+                glib::timeout_future(Duration::from_millis(500)).await;
             }
-            if let Some(profile) = ctx.profiles().into_iter().find(|p| p.name == name) {
-                profiles::apply_profile(&ctx, &profile).await;
-            }
+
+            profiles::apply_profile(&ctx, &profile).await;
         });
     }
 

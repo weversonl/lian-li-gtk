@@ -12,6 +12,7 @@ use lianli_shared::rgb::{RgbDirection, RgbEffect, RgbMode, RgbScope};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Duration;
 
 /// Global Effects page controls beyond mode/gradient — see
 /// `Ctx::global_effect_controls`/`set_global_effect_controls`.
@@ -163,7 +164,7 @@ pub struct Ctx {
 #[allow(dead_code)]
 pub type SharedCtx = Rc<Ctx>;
 
-const TOAST_TIMEOUT_SECS: u32 = 5;
+const TOAST_TIMEOUT_SECS: u32 = 7;
 
 /// Every toast shown to the user also lands here — the app has no other
 /// logging, and a launcher-started process (desktop entry, autostart) has
@@ -182,18 +183,32 @@ fn log_toast(message: &str) {
     }
 }
 
+/// AdwToast's own `timeout` pauses the countdown while the toast is
+/// hovered/focused — with the overlay sitting where the cursor often rests
+/// right after clicking Apply, that left toasts parked on screen until
+/// manually dismissed. Forcing `dismiss()` ourselves on a plain timer
+/// ignores hover/focus entirely, so it always clears after
+/// `TOAST_TIMEOUT_SECS`.
+fn auto_dismiss(toast: &adw::Toast) {
+    toast.set_timeout(0);
+    let toast = toast.clone();
+    glib::timeout_add_local_once(Duration::from_secs(TOAST_TIMEOUT_SECS as u64), move || {
+        toast.dismiss();
+    });
+}
+
 impl Ctx {
     pub fn toast(&self, message: &str) {
         log_toast(message);
         let toast = adw::Toast::new(message);
-        toast.set_timeout(TOAST_TIMEOUT_SECS);
+        auto_dismiss(&toast);
         self.toast_overlay.add_toast(toast);
     }
 
     pub fn toast_with_button(&self, message: &str, button_label: &str, on_click: impl Fn() + 'static) {
         log_toast(message);
         let toast = adw::Toast::new(message);
-        toast.set_timeout(TOAST_TIMEOUT_SECS);
+        auto_dismiss(&toast);
         toast.set_button_label(Some(button_label));
         toast.connect_button_clicked(move |_| on_click());
         self.toast_overlay.add_toast(toast);

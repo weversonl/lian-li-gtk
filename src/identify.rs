@@ -1,17 +1,24 @@
-//! "Identify": blinks a wireless device 3x in yellow, then restores its
-//! previous effect (from `Ctx::last_effect`, or a captured color snapshot
-//! if nothing was recorded). Wireless-only — wired devices have no
-//! per-LED read/write query in this protocol.
+//! "Identify": blinks a device 3x in yellow, then restores its previous
+//! effect (from `Ctx::last_effect`/the RGB Editor snapshot, or — wireless
+//! only — a captured color snapshot if nothing was recorded).
+//!
+//! Wireless devices blink via a real per-LED `SetRgbFrames` animation.
+//! Wired devices have no per-LED read/write query in this protocol and no
+//! raw frame buffer that's safe to guess the physical LED order of (see
+//! `apply_segments`'s doc comment on ring vs. linear-strip layout), so the
+//! blink there is "fake": alternating `SetRgbEffect` calls toggling
+//! `disabled` on a yellow Static effect, through the same ring-aware
+//! scope/zone addressing the RGB Editor uses.
 //!
 //! Sends are spaced out by `IDENTIFY_SEND_DELAY_MS`: the daemon acks a
 //! command once it's queued on the RF dongle, not once the device confirms
 //! receipt, so back-to-back sends to the same device can still collide.
 
 use crate::context::{Ctx, LastEffect};
-use crate::effects::{identify_frames, IDENTIFY_STEP_MS};
+use crate::effects::{identify_frames, percent_to_brightness4, percent_to_speed4, IDENTIFY_STEP_MS};
 use gtk::glib;
 use lianli_shared::ipc::IpcRequest;
-use lianli_shared::rgb::RgbDeviceCapabilities;
+use lianli_shared::rgb::{RgbDeviceCapabilities, RgbDirection, RgbEffect, RgbMode, RgbScope};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -155,11 +162,6 @@ pub fn spawn_frame_heartbeat(ctx: &Rc<Ctx>) {
 }
 
 pub async fn identify(ctx: &Rc<Ctx>, device_id: &str) {
-    if !device_id.starts_with("wireless:") {
-        ctx.toast(ctx.t("identify.no_wired"));
-        return;
-    }
-
     let caps = match ctx
         .client
         .call::<Vec<RgbDeviceCapabilities>>(IpcRequest::GetRgbCapabilities)
@@ -171,10 +173,18 @@ pub async fn identify(ctx: &Rc<Ctx>, device_id: &str) {
             return;
         }
     };
-    let Some(dev_caps) = caps.iter().find(|c| c.device_id == device_id) else {
+    // Wired ports/groups are named differently across endpoints — see
+    // `rgb_caps_id_matches`'s doc comment.
+    let Some(dev_caps) = caps.iter().find(|c| crate::pages::rgb_editor::rgb_caps_id_matches(&c.device_id, device_id))
+    else {
         ctx.toast(ctx.t("identify.caps_not_found"));
         return;
     };
+
+    if !device_id.starts_with("wireless:") {
+        identify_wired(ctx, device_id, dev_caps).await;
+        return;
+    }
 
     let zone_count = dev_caps.zones.len().max(1);
     let led_count: usize = dev_caps.zones.iter().map(|z| z.led_count as usize).sum();
@@ -219,4 +229,73 @@ pub async fn identify(ctx: &Rc<Ctx>, device_id: &str) {
         let _ = ctx.client.call_unit(request).await;
         send_delay().await;
     }
+}
+
+/// 25% yellow, matching `effects::identify_frames`' wireless blink.
+const IDENTIFY_COLOR: [u8; 3] = [(255.0 * 0.25) as u8, (255.0 * 0.25) as u8, 0];
+
+const IDENTIFY_OFF: [u8; 3] = [0, 0, 0];
+
+/// "Fake" identify for wired devices: 3 on/off toggles of a Static effect
+/// between yellow and literal black, through whatever zone/scope addressing
+/// the device actually renders correctly (ring-aware `render_profile`
+/// devices go through zone 0 with per-fan colors, like the RGB Editor's
+/// Segments apply; plain devices get one `scope: All` Static per zone).
+/// Toggling `RgbEffect.disabled` instead of swapping the color was tried
+/// first — on real ENE6K77 hardware it doesn't force an immediate
+/// re-render, so the zone just stayed lit yellow the whole sequence.
+/// Finishes by restoring the last applied effect the same way
+/// `reapply_last_effect` does for wireless — this toasts on its own if
+/// nothing was recorded.
+async fn identify_wired(ctx: &Rc<Ctx>, device_id: &str, dev_caps: &RgbDeviceCapabilities) {
+    let brightness = percent_to_brightness4(25.0);
+    let speed = percent_to_speed4(30.0);
+    let zone_count = dev_caps.zones.len().max(1) as u8;
+
+    // Tells any running client-driven Segments animation loop on these
+    // zones to stop, same as a normal RGB Editor apply — otherwise it keeps
+    // sending its own frames throughout the blink, fighting the toggle.
+    if dev_caps.render_profile.is_some() {
+        ctx.bump_segment_anim(&format!("{device_id}:0"));
+    } else {
+        for zone in 0..zone_count {
+            ctx.bump_segment_anim(&format!("{device_id}:{zone}"));
+        }
+    }
+
+    for lit in [true, false, true, false, true, false] {
+        let color = if lit { IDENTIFY_COLOR } else { IDENTIFY_OFF };
+        if let Some(profile) = dev_caps.render_profile.as_ref() {
+            let per_fan = (profile.fan_count as usize).max(1);
+            let effect = RgbEffect {
+                mode: RgbMode::Static,
+                colors: vec![color; per_fan],
+                speed,
+                brightness,
+                direction: RgbDirection::default(),
+                scope: RgbScope::All,
+                disabled: false,
+            };
+            let request = IpcRequest::SetRgbEffect { device_id: dev_caps.device_id.clone(), zone: 0, effect };
+            let _ = ctx.client.call_unit(request).await;
+        } else {
+            for zone in 0..zone_count {
+                let effect = RgbEffect {
+                    mode: RgbMode::Static,
+                    colors: vec![color],
+                    speed,
+                    brightness,
+                    direction: RgbDirection::default(),
+                    scope: RgbScope::All,
+                    disabled: false,
+                };
+                let request = IpcRequest::SetRgbEffect { device_id: dev_caps.device_id.clone(), zone, effect };
+                let _ = ctx.client.call_unit(request).await;
+                send_delay().await;
+            }
+        }
+        glib::timeout_future(Duration::from_millis(IDENTIFY_STEP_MS as u64)).await;
+    }
+
+    reapply_last_effect(ctx, device_id).await;
 }
