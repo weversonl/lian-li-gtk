@@ -29,6 +29,7 @@ use lianli_shared::ipc::IpcRequest;
 use lianli_shared::rgb::{RgbDeviceCapabilities, RgbDirection, RgbEffect, RgbMode, RgbScope};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 /// Client-rendered modes offered for wireless devices, beyond the two the
 /// daemon's own capabilities report (Static, Direct).
@@ -1955,13 +1956,28 @@ pub(crate) async fn apply_segments(
                 scope: middle_scope,
                 disabled: false,
             };
+            // Wireless RF sends are lossy — a single attempt per call let one
+            // dropped packet (not uncommon) fail the whole apply, skip
+            // persistence (only runs `if all_ok`), and leave the fan stuck
+            // on whatever it last rendered with nothing to auto-heal it.
+            // Same retry/backoff as `identify::reapply_last_effect`.
+            const SEGMENTS_APPLY_ATTEMPTS: u32 = 3;
             let mut all_ok = true;
             for effect in [outer.clone(), inner.clone()] {
-                let request =
-                    IpcRequest::SetRgbEffect { device_id: dev_caps.device_id.clone(), zone: 0, effect };
-                if ctx.client.call_unit(request).await.is_err() {
-                    all_ok = false;
+                let mut sent = false;
+                for attempt in 0..SEGMENTS_APPLY_ATTEMPTS {
+                    let request = IpcRequest::SetRgbEffect {
+                        device_id: dev_caps.device_id.clone(),
+                        zone: 0,
+                        effect: effect.clone(),
+                    };
+                    if ctx.client.call_unit(request).await.is_ok() {
+                        sent = true;
+                        break;
+                    }
+                    glib::timeout_future(Duration::from_millis(100 * (attempt as u64 + 1))).await;
                 }
+                all_ok &= sent;
             }
             if all_ok {
                 crate::rgb_persist::persist_rgb_effect(
