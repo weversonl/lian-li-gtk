@@ -128,11 +128,18 @@ async fn reapply_last_effect_inner(ctx: &Rc<Ctx>, device_id: &str, notify_on_fai
 /// wireless devices saturated the shared RF dongle and caused real fan
 /// stalls/RGB flicker.
 ///
-/// Scoped to `LastEffect::Frames` only, which already excludes per-zone
-/// animated Segments (that self-heals via its own `SetRgbDirect` loop and
-/// never records a `Frames` entry) while still covering whole-device
-/// Segments (a single-zone device applies via one `SetRgbFrames`, same as
-/// any other animated effect, and needs the same reinforcement).
+/// Covers both `LastEffect::Frames` (per-zone animated Segments excluded —
+/// it self-heals via its own `SetRgbDirect` loop and never records a
+/// `Frames` entry; whole-device Segments applies via one `SetRgbFrames`
+/// like any other animated effect, and still needs this) and
+/// `LastEffect::Static` (plain color/Breathing applies, and the ring-aware
+/// Segments apply for render_profile devices — see `rgb_editor.rs`'s
+/// `record_static_effect` call there). Static needs its own reinforcement
+/// for the same reason Frames does: `persist_rgb_effect` only writes to
+/// the daemon's `AppConfig`, and that drives auto-resync for wired, not
+/// wireless (see its doc comment) — SL-INF fan hubs have been observed
+/// idle-blanking their own RGB firmware-side hours after the last apply,
+/// with nothing in the daemon noticing or correcting it.
 const HEARTBEAT_SECS: u64 = 20;
 
 pub fn spawn_frame_heartbeat(ctx: &Rc<Ctx>) {
@@ -151,11 +158,20 @@ pub fn spawn_frame_heartbeat(ctx: &Rc<Ctx>) {
                 .collect();
 
             for device_id in device_ids {
-                let Some(LastEffect::Frames(frames, interval_ms, _)) = ctx.last_effect_for(&device_id) else {
-                    continue;
-                };
-                let request = IpcRequest::SetRgbFrames { device_id, frames, interval_ms };
-                let _ = ctx.client.call_unit(request).await;
+                match ctx.last_effect_for(&device_id) {
+                    Some(LastEffect::Frames(frames, interval_ms, _)) => {
+                        let request = IpcRequest::SetRgbFrames { device_id, frames, interval_ms };
+                        let _ = ctx.client.call_unit(request).await;
+                    }
+                    Some(LastEffect::Static(zone_effects)) => {
+                        for (zone, effect) in zone_effects {
+                            let request = IpcRequest::SetRgbEffect { device_id: device_id.clone(), zone, effect };
+                            let _ = ctx.client.call_unit(request).await;
+                            send_delay().await;
+                        }
+                    }
+                    None => {}
+                }
             }
         }
     });

@@ -1980,6 +1980,13 @@ pub(crate) async fn apply_segments(
                 all_ok &= sent;
             }
             if all_ok {
+                // Feeds `identify::reapply_last_effect` and the frame
+                // heartbeat's periodic resend — without this, nothing
+                // records what to push back if the fan hub's own firmware
+                // idle-blanks its RGB later, which `persist_rgb_effect`
+                // alone doesn't cover (see its doc comment: the daemon's
+                // AppConfig-driven auto-resync only engages for wired).
+                ctx.record_static_effect(&dev_caps.device_id, vec![(0, outer.clone()), (0, inner.clone())]);
                 crate::rgb_persist::persist_rgb_effect(
                     ctx,
                     &dev_caps.device_id,
