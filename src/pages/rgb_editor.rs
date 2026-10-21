@@ -2091,6 +2091,14 @@ pub(crate) async fn apply_segments(
         let my_gen = ctx.bump_segment_anim(&key);
         ctx.mark_profile_dirty();
         ctx.toast(ctx.t("rgb_editor.segments_applied"));
+        // Wireless RF drops the occasional packet, especially right after
+        // boot before the link has settled — one failure must not kill an
+        // animation that's meant to run for the rest of the session (see
+        // the retry above for the same reasoning). Only give up after
+        // several *consecutive* failures, which means the device actually
+        // went away rather than one lost frame.
+        const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+        let mut consecutive_failures = 0u32;
         let mut i = 0usize;
         loop {
             if ctx.segment_anim_current(&key) != my_gen {
@@ -2102,9 +2110,14 @@ pub(crate) async fn apply_segments(
                 colors: frames[i % frames.len()].clone(),
             };
             if ctx.client.call_unit(request).await.is_err() {
-                return;
+                consecutive_failures += 1;
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    return;
+                }
+            } else {
+                consecutive_failures = 0;
+                i += 1;
             }
-            i += 1;
             glib::timeout_future(interval).await;
         }
     }
